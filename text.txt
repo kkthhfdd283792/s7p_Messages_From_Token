@@ -563,7 +563,7 @@ async def with_db_retry(func, max_retries=5, delay=1):
             raise e
 
 # إضافة دالة للتعامل مع أخطاء التليجرام الداخلية
-async def with_telegram_retry(func, max_retries=3, delay=2):
+async def with_telegram_retry(func, max_retries=12, delay=2):  # جعل 12 افتراضياً
     """تنفيذ دالة مع إعادة المحاولة عند حدوث أخطاء في تليجرام"""
     for attempt in range(max_retries):
         try:
