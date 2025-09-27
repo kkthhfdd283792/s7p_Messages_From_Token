@@ -927,7 +927,7 @@ async def process_message_chunk(bot, start_id, end_id, stats, seen_tokens, seen_
     except Exception as e:
         print(f"Error processing chunk {start_id}-{end_id}: {e}")
 
-async def validate_tokens_parallel(tokens_list, max_concurrent=15):
+async def validate_tokens_parallel(tokens_list, max_concurrent=10):
     """التحقق من صحة التوكنات بشكل متوازي مع تحديد حد التزامن"""
     # إنشاء قائمة بالمهام
     tasks = []
@@ -1153,7 +1153,7 @@ async def extract_users_from_bot(bot_token, user_id):
         users = set()
         max_id = await find_max_message_id(temp_bot)
         
-        batch_size = 150
+        batch_size = 100
         for i in range(1, max_id + 1, batch_size):
             try:
                 end_range = min(i + batch_size, max_id + 1)
