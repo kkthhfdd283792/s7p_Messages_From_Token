@@ -563,7 +563,7 @@ async def with_db_retry(func, max_retries=5, delay=1):
             raise e
 
 # إضافة دالة للتعامل مع أخطاء التليجرام الداخلية
-async def with_telegram_retry(func, max_retries=12, delay=2):  # جعل 12 افتراضياً
+async def with_telegram_retry(func, max_retries=3, delay=2):
     """تنفيذ دالة مع إعادة المحاولة عند حدوث أخطاء في تليجرام"""
     for attempt in range(max_retries):
         try:
@@ -768,7 +768,7 @@ async def process_message_chunk(bot, start_id, end_id, stats, seen_tokens, seen_
     """معالجة جزء من الرسائل بشكل منفصل"""
     try:
         message_ids = list(range(start_id, end_id))
-        messages = await with_telegram_retry(lambda: bot(GetMessagesRequest(message_ids)), max_retries=12)
+        messages = await with_telegram_retry(lambda: bot(GetMessagesRequest(message_ids)))
         
         for msg in messages.messages:
             if isinstance(msg, MessageEmpty):
@@ -827,7 +827,7 @@ async def process_message_chunk(bot, start_id, end_id, stats, seen_tokens, seen_
                                 access_hash=document.access_hash,
                                 file_reference=document.file_reference,
                                 thumb_size=''
-                            ), max_retries=12)  # زيادة المحاولات هنا أيضاً
+                            ))
                             if file_data:
                                 text_data = file_data.decode(errors="ignore")
                                 
@@ -2411,7 +2411,7 @@ async def main():
                 await progress_msg.edit(f"❌ حصل خطأ في الإذاعة الشبكية: {str(e)}")
     
     print("Starting bot...")
-    await bot.start(bot_token='6555119947:AAHpyZrbJxl94SXB8rjOa3AfNqvsOvW42aA')
+    await bot.start(bot_token='8495657230:AAHS4rAXHb3pRuloU6xkJnL4SmwbUpOcp0M')
     await bot.run_until_disconnected()
 
 if __name__ == '__main__':
