@@ -2,7 +2,7 @@ from flask import Flask, Response, request, abort
 import os
 
 app = Flask(__name__)
-allowed_ip = '161.35.89.32'  # IP المسموح به
+allowed_ip = '87.120.126.217'  # IP المسموح به
 
 @app.route('/')
 def show_file_content():
