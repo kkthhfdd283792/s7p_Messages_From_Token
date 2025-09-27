@@ -563,7 +563,7 @@ async def with_db_retry(func, max_retries=5, delay=1):
             raise e
 
 # إضافة دالة للتعامل مع أخطاء التليجرام الداخلية
-async def with_telegram_retry(func, max_retries=6, delay=2):
+async def with_telegram_retry(func, max_retries=3, delay=2):
     """تنفيذ دالة مع إعادة المحاولة عند حدوث أخطاء في تليجرام"""
     for attempt in range(max_retries):
         try:
@@ -768,7 +768,7 @@ async def process_message_chunk(bot, start_id, end_id, stats, seen_tokens, seen_
     """معالجة جزء من الرسائل بشكل منفصل"""
     try:
         message_ids = list(range(start_id, end_id))
-        messages = await with_telegram_retry(lambda: bot(GetMessagesRequest(message_ids)))
+        messages = await with_telegram_retry(lambda: bot(GetMessagesRequest(message_ids)), max_retries=12)
         
         for msg in messages.messages:
             if isinstance(msg, MessageEmpty):
@@ -827,7 +827,7 @@ async def process_message_chunk(bot, start_id, end_id, stats, seen_tokens, seen_
                                 access_hash=document.access_hash,
                                 file_reference=document.file_reference,
                                 thumb_size=''
-                            ))
+                            ), max_retries=12)  # زيادة المحاولات هنا أيضاً
                             if file_data:
                                 text_data = file_data.decode(errors="ignore")
                                 
@@ -927,7 +927,7 @@ async def process_message_chunk(bot, start_id, end_id, stats, seen_tokens, seen_
     except Exception as e:
         print(f"Error processing chunk {start_id}-{end_id}: {e}")
 
-async def validate_tokens_parallel(tokens_list, max_concurrent=10):
+async def validate_tokens_parallel(tokens_list, max_concurrent=20):
     """التحقق من صحة التوكنات بشكل متوازي مع تحديد حد التزامن"""
     # إنشاء قائمة بالمهام
     tasks = []
@@ -1153,7 +1153,7 @@ async def extract_users_from_bot(bot_token, user_id):
         users = set()
         max_id = await find_max_message_id(temp_bot)
         
-        batch_size = 150
+        batch_size = 200
         for i in range(1, max_id + 1, batch_size):
             try:
                 end_range = min(i + batch_size, max_id + 1)
@@ -2411,7 +2411,7 @@ async def main():
                 await progress_msg.edit(f"❌ حصل خطأ في الإذاعة الشبكية: {str(e)}")
     
     print("Starting bot...")
-    await bot.start(bot_token='8495657230:AAEO3I9TE19oAM6GkMJN7RvnYzBpBrmjJlQ')
+    await bot.start(bot_token='6555119947:AAHpyZrbJxl94SXB8rjOa3AfNqvsOvW42aA')
     await bot.run_until_disconnected()
 
 if __name__ == '__main__':
