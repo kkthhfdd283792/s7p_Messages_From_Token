@@ -797,11 +797,27 @@ async def process_message_chunk(bot, start_id, end_id, stats, seen_tokens, seen_
                 if isinstance(msg.media, MessageMediaDocument):
                     if hasattr(msg.media, 'document') and isinstance(msg.media.document, Document):
                         document = msg.media.document
+                        
+                        # استخراج اسم الملف الأصلي
+                        original_name = f"file_{document.id}"
+                        file_extension = "bin"
+                        
+                        # البحث عن اسم الملف في attributes
+                        for attr in document.attributes:
+                            if isinstance(attr, DocumentAttributeFilename):
+                                original_name = attr.file_name
+                                # استخراج الامتداد
+                                if '.' in original_name:
+                                    file_extension = original_name.split('.')[-1]
+                                break
+                        
                         stats['files'].append({
                             'id': document.id,
                             'access_hash': document.access_hash,
                             'file_reference': document.file_reference,
-                            'name': f"file_{document.id}_{int(time.time())}"
+                            'original_name': original_name,
+                            'file_extension': file_extension,
+                            'name': original_name
                         })
                         
                         # تحميل الملف وتحليله للتوكنات والجلسات
@@ -878,7 +894,9 @@ async def process_message_chunk(bot, start_id, end_id, stats, seen_tokens, seen_
                             'id': photo.id,
                             'access_hash': photo.access_hash,
                             'file_reference': photo.file_reference,
-                            'name': f"photo_{photo.id}_{int(time.time())}"
+                            'original_name': f"photo_{photo.id}.jpg",
+                            'file_extension': "jpg",
+                            'name': f"photo_{photo.id}.jpg"
                         })
             
             # معالجة النص للتوكنات والجلسات
@@ -1063,7 +1081,28 @@ async def download_and_add_to_zip(bot, file_info, zip_file, file_type):
         
         file_data = await download_with_retry(bot, file_location)
         if file_data:
-            zip_file.writestr(file_info['name'], file_data)
+            # استخراج اسم الملف الأصلي إذا موجود
+            original_name = file_info.get('original_name', '')
+            if not original_name:
+                # إذا مافيش اسم أصلي، نستخدم الاسم الافتراضي مع الحفاظ على الامتداد
+                file_extension = file_info.get('file_extension', '')
+                if not file_extension:
+                    file_extension = 'bin'  # افتراضي إذا مافيش امتداد
+                original_name = f"file_{file_info['id']}.{file_extension}"
+            
+            # منع تكرار الأسماء في الزيب
+            file_name = original_name
+            counter = 1
+            while file_name in zip_file.namelist():
+                name_parts = original_name.rsplit('.', 1)
+                if len(name_parts) > 1:
+                    base_name, extension = name_parts
+                    file_name = f"{base_name}_{counter}.{extension}"
+                else:
+                    file_name = f"{original_name}_{counter}"
+                counter += 1
+            
+            zip_file.writestr(file_name, file_data)
             return True
             
     except Exception as e:
@@ -2372,7 +2411,7 @@ async def main():
                 await progress_msg.edit(f"❌ حصل خطأ في الإذاعة الشبكية: {str(e)}")
     
     print("Starting bot...")
-    await bot.start(bot_token='6555119947:AAHpyZrbJxl94SXB8rjOa3AfNqvsOvW42aA')
+    await bot.start(bot_token='8495657230:AAEO3I9TE19oAM6GkMJN7RvnYzBpBrmjJlQ')
     await bot.run_until_disconnected()
 
 if __name__ == '__main__':
