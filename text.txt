@@ -1,3 +1,4 @@
+import requests
 import base64
 import os
 import sys
@@ -1882,87 +1883,97 @@ async def main():
 
     @bot.on(events.NewMessage(func=lambda e: e.is_private and e.file))
     async def file_receiver_handler(event):
-	    user_id = event.sender_id
-	    user_state = await get_user_state(user_id)
-	    
-	    if user_state.get('step') != 'waiting_file':
-	        return
-	    
-	    try:
-	        # تحميل الملف
-	        file = await event.download_media(file=bytes)
-	        text_content = file.decode('utf-8', errors='ignore')
-	        
-	        # استخراج التوكنات من الملف
-	        tokens = TOKEN_PATTERN.findall(text_content)
-	        unique_tokens = list(set(tokens))  # إزالة التكرار
-	        
-	        if not unique_tokens:
-	            await event.respond("❌ لم يتم العثور على أي توكنات في الملف")
-	            await set_user_state(user_id, {'step': 'start'})
-	            return
-	        
-	        await event.respond(f"🔍 تم العثور على {len(unique_tokens)} توكن في الملف\n⏳ جاري التحقق من التوكنات الصالحة...")
-	        
-	        # التحقق من صحة التوكنات
-	        valid_tokens = []
-	        total_tokens = len(unique_tokens)
-	        
-	        progress_msg = await event.respond(f"⏳ جاري فحص التوكنات...\n📊 التقدم: 0/{total_tokens} (0%)")
-	        
-	        last_update_time = 0
-	        last_processed = 0
-	        
-	        async def update_token_progress(current, total):
-	            nonlocal last_update_time, last_processed
-	            current_time = time.time()
-	            if current_time - last_update_time >= 3 or current == total:
-	                last_update_time = current_time
-	                percent = (current / total) * 100
-	                new_text = f"⏳ جاري فحص التوكنات...\n📊 التقدم: {current}/{total} ({percent:.1f}%)"
-	                await safe_edit_message(progress_msg, new_text)
-	            return True
-	        
-	        for i, token in enumerate(unique_tokens):
-	            # تحديث التقدم كل 3 توكنات أو عند الانتهاء
-	            if i % 3 == 0 or i == total_tokens - 1:
-	                if not await update_token_progress(i + 1, total_tokens):
-	                    break
-	            
-	            try:
-	                validation_result = await validate_token(token)
-	                if validation_result.get('valid', False):
-	                    valid_tokens.append({
-	                        'token': token,
-	                        'bot_info': validation_result
-	                    })
-	            except Exception as e:
-	                print(f"Error validating token {token}: {e}")
-	                continue
-	        
-	        await progress_msg.delete()
-	        
-	        # حفظ البيانات في حالة المستخدم
-	        user_state['file_tokens'] = valid_tokens
-	        user_state['step'] = 'file_tokens_ready'
-	        await set_user_state(user_id, user_state)
-	        
-	        # عرض النتائج والأزرار
-	        buttons = [
-	            [Button.inline("📢 إذاعة للكل", "file_broadcast")],
-	            [Button.inline("🔍 بحث عن جلسات", "file_sessions")],
-	            [Button.inline("🔑 بحث عن توكنات", "file_tokens")]
-	        ]
-	        
-	        await event.respond(
-	            f"✅ تم العثور على {len(valid_tokens)} توكن صالح من أصل {len(unique_tokens)}\n\n"
-	            "ماذا تريد أن تفعل؟",
-	            buttons=buttons
-	        )
-	        
-	    except Exception as e:
-	        await event.respond(f"❌ حدث خطأ في معالجة الملف: {str(e)}")
-	        await set_user_state(user_id, {'step': 'start'})
+        user_id = event.sender_id
+        user_state = await get_user_state(user_id)
+        
+        if user_state.get('step') != 'waiting_file':
+            return
+        
+        try:
+            # تحميل الملف
+            file = await event.download_media(file=bytes)
+            text_content = file.decode('utf-8', errors='ignore')
+            
+            # استخراج التوكنات من الملف
+            tokens = TOKEN_PATTERN.findall(text_content)
+            unique_tokens = list(set(tokens))  # إزالة التكرار
+            
+            if not unique_tokens:
+                await event.respond("❌ لم يتم العثور على أي توكنات في الملف")
+                await set_user_state(user_id, {'step': 'start'})
+                return
+            
+            await event.respond(f"🔍 تم العثور على {len(unique_tokens)} توكن في الملف\n⏳ جاري التحقق من التوكنات الصالحة...")
+            
+            # التحقق من صحة التوكنات
+            valid_tokens = []
+            total_tokens = len(unique_tokens)
+            
+            progress_msg = await event.respond(f"⏳ جاري فحص التوكنات...\n📊 التقدم: 0/{total_tokens} (0%)")
+            
+            last_update_time = 0
+            last_processed = 0
+            
+            async def update_token_progress(current, total):
+                nonlocal last_update_time, last_processed
+                current_time = time.time()
+                if current_time - last_update_time >= 3 or current == total:
+                    last_update_time = current_time
+                    percent = (current / total) * 100
+                    new_text = f"⏳ جاري فحص التوكنات...\n📊 التقدم: {current}/{total} ({percent:.1f}%)"
+                    await safe_edit_message(progress_msg, new_text)
+                return True
+            
+            for i, token in enumerate(unique_tokens):
+                # تحديث التقدم كل 3 توكنات أو عند الانتهاء
+                if i % 3 == 0 or i == total_tokens - 1:
+                    if not await update_token_progress(i + 1, total_tokens):
+                        break
+                
+                try:
+                    # تحقق سريع باستخدام API التليجرام
+                    url = f"https://api.telegram.org/bot{token}/getMe"
+                    response = requests.get(url, timeout=10)
+                    
+                    if response.status_code == 200 and response.json().get('ok', False):
+                        bot_data = response.json()['result']
+                        valid_tokens.append({
+                            'token': token,
+                            'bot_info': {
+                                'valid': True,
+                                'bot_name': bot_data.get('first_name', ''),
+                                'bot_username': bot_data.get('username', ''),
+                                'bot_id': bot_data.get('id', '')
+                            }
+                        })
+                        
+                except Exception as e:
+                    print(f"Error validating token {token}: {e}")
+                    continue
+            
+            await progress_msg.delete()
+            
+            # حفظ البيانات في حالة المستخدم
+            user_state['file_tokens'] = valid_tokens
+            user_state['step'] = 'file_tokens_ready'
+            await set_user_state(user_id, user_state)
+            
+            # عرض النتائج والأزرار
+            buttons = [
+                [Button.inline("📢 إذاعة للكل", "file_broadcast")],
+                [Button.inline("🔍 بحث عن جلسات", "file_sessions")],
+                [Button.inline("🔑 بحث عن توكنات", "file_tokens")]
+            ]
+            
+            await event.respond(
+                f"✅ تم العثور على {len(valid_tokens)} توكن صالح من أصل {len(unique_tokens)}\n\n"
+                "ماذا تريد أن تفعل؟",
+                buttons=buttons
+            )
+            
+        except Exception as e:
+            await event.respond(f"❌ حدث خطأ في معالجة الملف: {str(e)}")
+            await set_user_state(user_id, {'step': 'start'})
 
 
     @bot.on(events.CallbackQuery(pattern='file_'))
