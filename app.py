@@ -2,12 +2,12 @@ from flask import Flask, Response, request, abort
 import os
 
 app = Flask(__name__)
-allowed_ip = ['87.120.126.217', '45.141.36.67'] # IP المسموح به
+allowed_ip = ['87.120.126.217', '45.141.36.67']  # IP المسموح به
 
 @app.route('/')
 def show_file_content():
     # التحقق من عنوان IP
-    if request.remote_addr != allowed_ip:
+    if request.remote_addr not in allowed_ip:
         return abort(403)  # ممنوع الوصول
     
     # التأكد من وجود الملف
