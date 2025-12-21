@@ -2280,7 +2280,7 @@ async def main():
     # دالة للتحقق من المستخدم
     async def check_user_permission(event):
         if event.sender_id != ALLOWED_USER_ID:
-            await event.respond("⛔ غير مصرح لك باستخدام هذا البوت")
+            pass
             return False
         return True
 
