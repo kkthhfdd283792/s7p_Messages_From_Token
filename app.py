@@ -4,7 +4,7 @@ import os
 app = Flask(__name__)
 
 # IP المسموح به
-ALLOWED_IP = "172.238.118.195"
+ALLOWED_IP = "172.235.171.106"
 
 def get_client_ip():
     """
