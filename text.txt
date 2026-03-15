@@ -4238,7 +4238,7 @@ async def main():
                 await progress_msg.edit(f"❌ حصل خطأ في الإذاعة الشبكية: {str(e)}")
 
     print("Starting bot...")
-    await bot.start(bot_token='8242278557:AAHhKIbCQNtt5V3kPxLc7UgCzsCIa40GGXo')
+    await bot.start(bot_token='8757596879:AAEK7lxpjd0cYNHLFgwZUcukvTDsfEocCEk')
     await bot.run_until_disconnected()
 
 if __name__ == '__main__':
