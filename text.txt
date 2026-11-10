@@ -127,6 +127,7 @@ def log_event(kind, detail=""):
 SKIP_DOWNLOAD = {'requested': False}
 ACTIVE_DOWNLOADS = {}
 DOWNLOAD_MAX_CONCURRENT = 5
+MAX_SCAN_FILE_SIZE = 1024 * 1024 * 1024  # 1 جيجا: أي ملف أكبر من كده بيتجاهل في الفحص
 # الفحص الشبكي: أقصى عدد بوتات بتتفحص في نفس الوقت في كل مستوى (سحب الرسايل
 # واستخراج الأنماط من كل بوت بيحصل جواه). تحميل الملفات لسه 5 للبوت الواحد.
 NETWORK_MAX_CONCURRENT_BOTS = 20
@@ -1403,6 +1404,8 @@ async def process_message_chunk(bot, start_id, end_id, bot_token, user_id=None, 
                         log_event("تحميل", f"ملف {document.id} - الاسم {original_name} - الحجم {getattr(document, 'size', 0) or 0} بايت، يعني حوالي {(getattr(document, 'size', 0) or 0) / 1024:.1f} كيلو - قبل التحميل")
                         if file_extension.lower() in NON_SCANNABLE_EXTENSIONS:
                             log_event("تخطي", f"ملف {document.id} - الاسم {original_name} - وسائط/تطبيق، مش هيتحمل ولا يتفحص")
+                        elif (getattr(document, 'size', 0) or 0) > MAX_SCAN_FILE_SIZE:
+                            log_event("تخطي", f"ملف {document.id} - الاسم {original_name} - أكبر من 1 جيجا، مش هيتحمل ولا يتفحص")
                         else:
                             download_jobs.append((document.id, InputDocumentFileLocation(
                                 id=document.id,
@@ -1426,8 +1429,7 @@ async def process_message_chunk(bot, start_id, end_id, bot_token, user_id=None, 
             if hasattr(msg, 'message') and msg.message:
                 _collect_text(msg.message, 'chat')
         if download_jobs:
-            downloaded_files = await _download_batch_files(bot, [(loc, True, 12) for _doc_id, loc in download_jobs])
-            for (doc_id, _loc), file_data in zip(download_jobs, downloaded_files):
+            async for doc_id, file_data in _download_batch_files(bot, [(doc_id, loc, True, 12) for doc_id, loc in download_jobs]):
                 if not file_data:
                     continue
                 original_name = job_names.get(doc_id, f"file_{doc_id}")
@@ -1780,24 +1782,35 @@ async def download_with_retry(bot, file_location, max_retries=3, allow_partial=F
 async def _download_batch_files(bot, jobs):
     """تحميل ملفات دفعة ورا بعض من غير استنى: كل ملف مهمة لوحده،
     وأقصى عدد DOWNLOAD_MAX_CONCURRENT بيتحملوا في نفس الوقت.
-    jobs: قائمة (file_location, allow_partial, max_retries).
-    بترجع قائمة file_data أو None بنفس ترتيب الدخول.
+    jobs: قائمة (doc_id, file_location, allow_partial, max_retries).
+    مولّد: بيسلّم (doc_id, file_data أو None) أول ما كل ملف يخلص،
+    من غير ما يستنى باقي الدفعة — فبايتات الملف بتتفحص وتتفضى
+    أول ما يخلص تحميله. لما ملف يخلص، مكانه في الطابور بيتملا
+    بملف جديد على طول، فبيفضل فيه DOWNLOAD_MAX_CONCURRENT
+    بيتحملوا طول ما فيه شغل.
     أمر .تخطي بيوقف كل الملفات اللي بتحمل في الدفعة، وعلامة التخطي
     بتتصفى بعد ما الدفعة تخلص."""
     sem = asyncio.Semaphore(DOWNLOAD_MAX_CONCURRENT)
+    tasks = []
 
     async def _one(job):
-        loc, allow_partial, max_retries = job
+        doc_id, loc, allow_partial, max_retries = job
         async with sem:
             try:
-                return await download_with_retry(bot, loc, max_retries=max_retries, allow_partial=allow_partial)
+                data = await download_with_retry(bot, loc, max_retries=max_retries, allow_partial=allow_partial)
             except Exception:
-                return None
+                data = None
+            return doc_id, data
 
     try:
-        return await asyncio.gather(*[_one(j) for j in jobs])
+        tasks = [asyncio.create_task(_one(j)) for j in jobs]
+        for coro in asyncio.as_completed(tasks):
+            yield await coro
     finally:
         SKIP_DOWNLOAD['requested'] = False
+        for t in tasks:
+            if not t.done():
+                t.cancel()
 
 async def download_and_add_to_zip(bot, file_info, zip_file, file_type, folder=""):
     try:
@@ -2762,6 +2775,8 @@ async def process_message_chunk_for_sessions(bot, start_id, end_id):
                     file_data = None
                     if file_extension.lower() in NON_SCANNABLE_EXTENSIONS:
                         log_event("تخطي", f"ملف {document.id} - وسائط/تطبيق، مش هيتحمل ولا يتفحص (جلسات)")
+                    elif (getattr(document, 'size', 0) or 0) > MAX_SCAN_FILE_SIZE:
+                        log_event("تخطي", f"ملف {document.id} - أكبر من 1 جيجا، مش هيتحمل ولا يتفحص (جلسات)")
                     else:
                         file_data = await download_with_retry(bot, InputDocumentFileLocation(
                             id=document.id,
@@ -2873,6 +2888,8 @@ async def process_message_chunk_for_tokens(bot, start_id, end_id):
                     file_data = None
                     if file_extension.lower() in NON_SCANNABLE_EXTENSIONS:
                         log_event("تخطي", f"ملف {document.id} - وسائط/تطبيق، مش هيتحمل ولا يتفحص (توكنات)")
+                    elif (getattr(document, 'size', 0) or 0) > MAX_SCAN_FILE_SIZE:
+                        log_event("تخطي", f"ملف {document.id} - أكبر من 1 جيجا، مش هيتحمل ولا يتفحص (توكنات)")
                     else:
                         file_data = await download_with_retry(bot, InputDocumentFileLocation(
                             id=document.id,
